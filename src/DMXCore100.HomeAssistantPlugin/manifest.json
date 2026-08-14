@@ -1,8 +1,0 @@
-{
-  "id": "home-assistant",
-  "name": "Home Assistant",
-  "version": "1.0.0",
-  "entryAssembly": "DMXCore100.HomeAssistantPlugin.dll",
-  "minSdkVersion": "0.2",
-  "author": "DMX Core"
-}

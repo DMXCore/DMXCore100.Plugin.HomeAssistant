@@ -41,9 +41,12 @@ public class HomeAssistantPlugin : IPlugin
 
     public PluginInfo Info { get; } = new()
     {
-        Id = "home-assistant",
-        Name = "Home Assistant",
-        Version = "1.0.0",
+        // Id/Name/Version come from the csproj (PluginId, PluginDisplayName,
+        // Version) via the SDK-generated PluginBuildInfo, always in sync with
+        // the generated manifest.json
+        Id = PluginBuildInfo.Id,
+        Name = PluginBuildInfo.Name,
+        Version = PluginBuildInfo.Version,
         Description = "Publishes the device's entities to Home Assistant via MQTT Discovery (also works with openHAB, ioBroker, and Domoticz).",
         Settings =
         [
