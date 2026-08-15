@@ -8,7 +8,7 @@ namespace DMXCore100.HomeAssistantPlugin;
 /// <summary>
 /// Home Assistant REST client: <c>GET /api/states</c> to discover
 /// <c>scene.*</c> entities and <c>POST /api/services/scene/turn_on</c> to
-/// activate one. Same services Companion calls over the websocket.
+/// activate one.
 /// </summary>
 public sealed class HomeAssistantRestClient : IHomeAssistantApi
 {
@@ -68,12 +68,14 @@ public sealed class HomeAssistantRestClient : IHomeAssistantApi
 
         return (states ?? [])
             .Where(static state => state.EntityId.StartsWith("scene.", StringComparison.OrdinalIgnoreCase))
-            .Select(static state => new HomeAssistantScene
+            .Select(static state =>
             {
-                EntityId = state.EntityId,
-                Name = string.IsNullOrWhiteSpace(state.Attributes?.FriendlyName)
-                    ? state.EntityId
-                    : state.Attributes.FriendlyName,
+                string? friendlyName = state.Attributes?.FriendlyName;
+                return new HomeAssistantScene
+                {
+                    EntityId = state.EntityId,
+                    Name = string.IsNullOrWhiteSpace(friendlyName) ? state.EntityId : friendlyName,
+                };
             })
             .OrderBy(static scene => scene.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();

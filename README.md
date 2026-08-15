@@ -216,6 +216,14 @@ dmxcore/{serial}/plugin/home-assistant/availability       plugin online/offline 
 On the optional Home Assistant MQTT broker, the same topics are published
 and subscribed (availability included) so HA can see the device there too.
 
-Every push to `main` recreates the rolling `latest` release carrying the
-packed `.dmxplugin`; the DMX Core 100 product build downloads it from there
-and bundles it as a built-in plugin.
+## Credits
+
+- [AlexWHughes](https://github.com/AlexWHughes) — bidirectional scene control,
+  optional Home Assistant MQTT broker, and expose allow-list.
+- [HakanL](https://github.com/HakanL) (Hakan Lindestaf) — original MQTT
+  Discovery plugin that publishes the Core into Home Assistant.
+- [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+  — config, state, command, and availability topic layout.
+- [MQTTnet](https://github.com/dotnet/MQTTnet) — optional second MQTT client
+  when the Core Remote Control broker is not Home Assistant's.
+

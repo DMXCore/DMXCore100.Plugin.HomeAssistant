@@ -70,6 +70,8 @@ public class HomeAssistantPluginTests
 
             await Task.Delay(10);
         }
+
+        Assert.IsTrue(condition(), "Timed out waiting for condition.");
     }
 
     [TestMethod]
@@ -327,6 +329,30 @@ public class HomeAssistantPluginTests
     }
 
     [TestMethod]
+    public async Task Initialize_RestoresPersistedScenesAndSkipsBlankEntityIds()
+    {
+        var (plugin, _) = await CreateInitializedAsync(host =>
+        {
+            host.StateJson = JsonSerializer.Serialize(new PublishRecord
+            {
+                Scenes =
+                [
+                    new HomeAssistantScene { EntityId = "scene.movie_night", Name = "Movie Night" },
+                    new HomeAssistantScene { EntityId = "   ", Name = "Blank" },
+                    new HomeAssistantScene { EntityId = "scene.sunset", Name = "Sunset Show" },
+                ],
+            });
+        });
+
+        CollectionAssert.AreEqual(
+            new[] { "Movie Night", "Sunset Show" },
+            plugin.DiscoveredScenes.Select(scene => scene.Name).ToArray());
+        CollectionAssert.AreEqual(
+            new[] { "scene.movie_night", "scene.sunset" },
+            plugin.DiscoveredScenes.Select(scene => scene.EntityId).ToArray());
+    }
+
+    [TestMethod]
     public async Task Command_HaScene_Activates()
     {
         var (_, host, api) = await CreateWithHomeAssistantAsync();
@@ -430,17 +456,32 @@ public class HomeAssistantPluginTests
     [TestMethod]
     public async Task CueEndedThenStarted_DoesNotActivateStopScene()
     {
+        var delayStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdDelay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var (plugin, host, api) = await CreateWithHomeAssistantAsync((h, fake) =>
         {
             h.SetSetting("stop-ha-scene", "All Off");
             h.SetSetting("activate-scenes-from-cues", "false");
             fake.Scenes.Add(new HomeAssistantScene { EntityId = "scene.all_off", Name = "All Off" });
         });
-        plugin.StopSceneSettle = TimeSpan.FromMilliseconds(80);
+        plugin.DelayAsync = async (_, cancellationToken) =>
+        {
+            delayStarted.TrySetResult();
+            try
+            {
+                await holdDelay.Task.WaitAsync(cancellationToken);
+            }
+            finally
+            {
+                delayFinished.TrySetResult();
+            }
+        };
 
         await host.SimulateCueEndedAsync("cue.SUNSET");
+        await delayStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await host.SimulateCueStartedAsync("cue.SUNSET");
-        await Task.Delay(150);
+        await delayFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(0, api.Activated.Count);
     }
@@ -481,12 +522,17 @@ public class HomeAssistantPluginTests
     [TestMethod]
     public async Task CueEnded_EmptyStopSetting_DoesNothing()
     {
+        var delayRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var (plugin, host, api) = await CreateWithHomeAssistantAsync();
-        plugin.StopSceneSettle = TimeSpan.Zero;
+        plugin.DelayAsync = (_, _) =>
+        {
+            delayRan.TrySetResult();
+            return Task.CompletedTask;
+        };
 
         await host.SimulateCueEndedAsync("cue.SUNSET");
-        await Task.Delay(50);
 
+        Assert.IsFalse(delayRan.Task.IsCompleted);
         Assert.AreEqual(0, api.Activated.Count);
     }
 
@@ -551,6 +597,19 @@ public class HomeAssistantPluginTests
         Assert.IsTrue(host.ConnectionDetail!.Contains("HA MQTT connected"));
     }
 
+    [TestMethod]
+    public async Task HaMqttBroker_StartFailure_ReportsMqttError()
+    {
+        var mqtt = new FakeHomeAssistantMqttBroker { StartError = new InvalidOperationException("broker down") };
+        var plugin = new HomeAssistantPlugin(apiFactory: null, _ => mqtt);
+        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
+
+        await plugin.InitializeAsync(host, CancellationToken.None);
+
+        Assert.IsFalse(mqtt.IsConnected);
+        Assert.IsTrue(host.ConnectionDetail!.Contains("HA MQTT: broker down"));
+    }
+
     private sealed class FakeHomeAssistantApi : IHomeAssistantApi
     {
         public List<HomeAssistantScene> Scenes { get; set; } = [];
@@ -589,10 +648,17 @@ public class HomeAssistantPluginTests
     {
         public bool IsConnected { get; private set; }
 
+        public Exception? StartError { get; set; }
+
         public List<(string Topic, string Payload, bool Retain)> Published { get; } = [];
 
         public Task StartAsync(CancellationToken cancellationToken)
         {
+            if (this.StartError != null)
+            {
+                throw this.StartError;
+            }
+
             this.IsConnected = true;
             return Task.CompletedTask;
         }

@@ -52,7 +52,8 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        await ConnectAsync(cancellationToken);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.lifetime.Token);
+        await ConnectWithRetryAsync(linked.Token);
     }
 
     public async Task PublishAsync(string topic, string payload, bool retain, CancellationToken cancellationToken)
@@ -134,6 +135,28 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
         this.host.Logger.LogInformation("Connected to Home Assistant MQTT broker {Server}:{Port}", this.server, this.port);
     }
 
+    private async Task ConnectWithRetryAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await ConnectAsync(cancellationToken);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
+                await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            }
+        }
+    }
+
     private async Task HandleMessageAsync(MqttApplicationMessageReceivedEventArgs args)
     {
         string payload = args.ApplicationMessage.PayloadSegment.Count == 0
@@ -164,14 +187,10 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(5), this.lifetime.Token);
-            await ConnectAsync(this.lifetime.Token);
+            await ConnectWithRetryAsync(this.lifetime.Token);
         }
         catch (OperationCanceledException)
         {
-        }
-        catch (Exception ex)
-        {
-            this.host.Logger.LogWarning(ex, "Home Assistant MQTT reconnect failed");
         }
     }
 }

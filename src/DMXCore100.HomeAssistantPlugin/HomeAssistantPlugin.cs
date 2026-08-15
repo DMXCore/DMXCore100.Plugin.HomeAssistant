@@ -60,6 +60,7 @@ public class HomeAssistantPlugin : IPlugin
     private IHomeAssistantMqttBroker? haMqtt;
     private string statusPrefix = "";
     private string? haError;
+    private string? haMqttError;
 
     // Entities currently published to HA, keyed by objectId (rebuilt by every
     // PublishAll; commands and state changes resolve through this)
@@ -82,6 +83,9 @@ public class HomeAssistantPlugin : IPlugin
     }
 
     internal TimeSpan StopSceneSettle { get; set; } = TimeSpan.FromMilliseconds(400);
+
+    internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } =
+        static (delay, cancellationToken) => Task.Delay(delay, cancellationToken);
 
     public PluginInfo Info { get; } = new()
     {
@@ -351,8 +355,9 @@ public class HomeAssistantPlugin : IPlugin
         var catalog = await this.host.Entities.GetCatalogAsync(cancellationToken);
 
         var map = new Dictionary<string, PluginEntity>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<string> exposedLooks = ExposedLooks.Parse(this.host.Settings.GetString(ExposedLooksKey));
 
-        foreach (var entity in catalog.Where(IsExposed))
+        foreach (var entity in catalog.Where(item => IsExposed(item, exposedLooks)))
         {
             // A Select with no choices is not representable in HA
             if (entity.Kind == PluginEntityKind.Select && entity.Choices.Count == 0)
@@ -544,7 +549,7 @@ public class HomeAssistantPlugin : IPlugin
     {
         try
         {
-            await Task.Delay(this.StopSceneSettle, cancellationToken);
+            await this.DelayAsync(this.StopSceneSettle, cancellationToken);
             await ActivateConfiguredStopSceneAsync(cancellationToken);
         }
         catch (OperationCanceledException)
@@ -552,6 +557,10 @@ public class HomeAssistantPlugin : IPlugin
         }
         catch (ObjectDisposedException)
         {
+        }
+        catch (Exception ex)
+        {
+            this.host.Logger.LogWarning(ex, "HA scene when playback stops failed");
         }
     }
 
@@ -691,6 +700,7 @@ public class HomeAssistantPlugin : IPlugin
 
         if (this.haMqtt == null)
         {
+            this.haMqttError = null;
             ReportStatus();
             return;
         }
@@ -698,10 +708,12 @@ public class HomeAssistantPlugin : IPlugin
         try
         {
             await this.haMqtt.StartAsync(cancellationToken);
+            this.haMqttError = null;
             await PublishAll(cancellationToken);
         }
         catch (Exception ex)
         {
+            this.haMqttError = ex.Message;
             this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
             await this.haMqtt.DisposeAsync();
             this.haMqtt = null;
@@ -853,6 +865,10 @@ public class HomeAssistantPlugin : IPlugin
         {
             parts.Add("HA MQTT connected");
         }
+        else if (this.haMqttError != null)
+        {
+            parts.Add($"HA MQTT: {this.haMqttError}");
+        }
 
         if (AccessToken != null)
         {
@@ -908,7 +924,7 @@ public class HomeAssistantPlugin : IPlugin
         }
     }
 
-    private bool IsExposed(PluginEntity entity)
+    private bool IsExposed(PluginEntity entity, IReadOnlyList<string> exposedLooks)
     {
         string? settingKey = entity.Code.Split('.')[0].ToLowerInvariant() switch
         {
@@ -926,13 +942,9 @@ public class HomeAssistantPlugin : IPlugin
             return false;
         }
 
-        if (ExposedLooks.IsLook(entity))
+        if (ExposedLooks.IsLook(entity) && !ExposedLooks.Matches(entity, exposedLooks))
         {
-            IReadOnlyList<string> allow = ExposedLooks.Parse(this.host.Settings.GetString(ExposedLooksKey));
-            if (!ExposedLooks.Matches(entity, allow))
-            {
-                return false;
-            }
+            return false;
         }
 
         return true;

@@ -86,13 +86,14 @@ while (running)
                 break;
 
             case "activate":
-                if (parts.Length < 2)
+                string[] activateParts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (activateParts.Length < 2)
                 {
                     Console.WriteLine("usage: activate <entity_id|name>   e.g. activate scene.movie_night");
                     break;
                 }
 
-                string wanted = parts.Length > 2 ? input[("activate ".Length)..] : parts[1];
+                string wanted = activateParts[1];
                 HomeAssistantScene? match = plugin.DiscoveredScenes.FirstOrDefault(scene =>
                     string.Equals(scene.EntityId, wanted, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(scene.Name, wanted, StringComparison.OrdinalIgnoreCase));
@@ -132,6 +133,8 @@ while (running)
             case "stop":
                 await host.SimulateCueEndedAsync(parts.Length > 1 ? parts[1] : "cue.SUNSET");
                 await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.nowplaying", Text = "" });
+                await plugin.DelayAsync(plugin.StopSceneSettle, CancellationToken.None);
+                Console.WriteLine($"  {host.ConnectionDetail}");
                 break;
 
             case "v":
