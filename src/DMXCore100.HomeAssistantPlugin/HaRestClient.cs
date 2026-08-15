@@ -32,7 +32,9 @@ public sealed class HaRestClient : IDisposable
     {
         this.http = handler == null ? new HttpClient() : new HttpClient(handler);
         this.http.BaseAddress = new Uri(baseUrl.Trim().TrimEnd('/') + "/");
-        this.http.Timeout = TimeSpan.FromSeconds(8);
+        // Shorter than the host's 10 s action timeout so the plugin's more
+        // specific "did not answer" message is the one the user sees
+        this.http.Timeout = TimeSpan.FromSeconds(6);
         this.http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
         this.http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
