@@ -58,6 +58,82 @@ while (running)
                 await host.SimulateMqttMessageAsync($"dmxcore/{host.DeviceInfo.Serial}/{parts[1]}/set", parts[2]);
                 break;
 
+            case "ha":
+                if (parts.Length < 3)
+                {
+                    Console.WriteLine("usage: ha <url> <token>   e.g. ha http://homeassistant.local:8123 TOKEN");
+                    break;
+                }
+                host.SetSetting("ha-url", parts[1]);
+                host.SetSetting("ha-token", parts[2]);
+                await host.TriggerSettingsChangedAsync();
+                Console.WriteLine($"  {host.ConnectionDetail}");
+                break;
+
+            case "scenes":
+                IReadOnlyList<HomeAssistantScene> scenes = plugin.DiscoveredScenes;
+                if (scenes.Count == 0)
+                {
+                    Console.WriteLine("  no HA scenes (set url+token with `ha`, or wait for poll)");
+                    break;
+                }
+
+                foreach (HomeAssistantScene scene in scenes)
+                {
+                    Console.WriteLine($"  {scene.EntityId}  {scene.Name}");
+                }
+
+                break;
+
+            case "activate":
+                if (parts.Length < 2)
+                {
+                    Console.WriteLine("usage: activate <entity_id|name>   e.g. activate scene.movie_night");
+                    break;
+                }
+
+                string wanted = parts.Length > 2 ? input[("activate ".Length)..] : parts[1];
+                HomeAssistantScene? match = plugin.DiscoveredScenes.FirstOrDefault(scene =>
+                    string.Equals(scene.EntityId, wanted, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(scene.Name, wanted, StringComparison.OrdinalIgnoreCase));
+                if (match == null)
+                {
+                    Console.WriteLine($"  no scene matching '{wanted}'");
+                    break;
+                }
+
+                await host.SimulateMqttMessageAsync(
+                    $"dmxcore/{host.DeviceInfo.Serial}/ha-scene/{Discovery.ObjectId(match.EntityId)}/set",
+                    "ON");
+                Console.WriteLine($"  requested {match.EntityId}");
+                break;
+
+            case "poll":
+                if (host.PeriodicTasks.Count == 0)
+                {
+                    Console.WriteLine("  no HA poll scheduled (set url+token with `ha`)");
+                    break;
+                }
+
+                await host.RunPeriodicTaskAsync(0);
+                Console.WriteLine($"  {host.ConnectionDetail}");
+                break;
+
+            case "cue":
+                if (parts.Length < 2)
+                {
+                    Console.WriteLine("usage: cue <code>   e.g. cue cue.SUNSET");
+                    break;
+                }
+
+                await host.SimulateCueStartedAsync(parts[1]);
+                break;
+
+            case "stop":
+                await host.SimulateCueEndedAsync(parts.Length > 1 ? parts[1] : "cue.SUNSET");
+                await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.nowplaying", Text = "" });
+                break;
+
             case "v":
                 double level = parts.Length > 1 && double.TryParse(parts[1], out double parsed) ? parsed : 0.5;
                 await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.masterdimmer", Level = level });
@@ -113,6 +189,12 @@ static void PrintHelp()
           b                    simulate the HA birth message (republish)
           cmd <objectId> <p>   simulate an HA command (cmd preset_party ON,
                                cmd system_masterdimmer 40, cmd cv_src1 Mic)
+          ha <url> <token>     connect to Home Assistant and list scenes
+          scenes               list discovered Home Assistant scenes
+          activate <id|name>   activate a discovered HA scene
+          poll                 run the HA scene poll once
+          cue <code>           simulate a cue start (fires a matching HA scene)
+          stop [code]          simulate cue end / idle now-playing (stop HA scene)
           v [level]            simulate a master dimmer state change (0..1)
           np [text]            simulate a now-playing sensor change
           rm                   remove preset.PARTY from the catalog (ghost cleanup)

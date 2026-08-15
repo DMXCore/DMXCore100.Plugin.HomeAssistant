@@ -15,6 +15,12 @@ public sealed class PublishRecord
 
     public List<Entry> Entries { get; set; } = [];
 
+    /// <summary>
+    /// Last discovered Home Assistant <c>scene.*</c> entities, so names survive
+    /// a restart until the next poll.
+    /// </summary>
+    public List<HomeAssistantScene> Scenes { get; set; } = [];
+
     public sealed class Entry
     {
         public string ObjectId { get; set; } = "";
@@ -38,19 +44,5 @@ public sealed class PublishRecord
         }
 
         return new PublishRecord();
-    }
-
-    public static Task Save(IPluginHost host, string prefix, IReadOnlyDictionary<string, PluginEntity> published, CancellationToken cancellationToken)
-    {
-        var record = new PublishRecord
-        {
-            Prefix = prefix,
-            Entries = published
-                .Select(kvp => new Entry { ObjectId = kvp.Key, Component = Discovery.Component(kvp.Value.Kind) })
-                .OrderBy(x => x.ObjectId, StringComparer.Ordinal)
-                .ToList(),
-        };
-
-        return host.SetStateJsonAsync(JsonSerializer.Serialize(record), cancellationToken);
     }
 }
