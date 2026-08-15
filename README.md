@@ -3,7 +3,7 @@
 Built-in plugin that connects the device and Home Assistant in both
 directions:
 
-- **HA → DMX Core:** publishes the device's entities to Home Assistant via
+- **DMX Core → HA:** publishes the device's entities to Home Assistant via
   [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery).
   No custom component and no YAML on the Home Assistant side — entities
   appear automatically, grouped under one device. openHAB, ioBroker, and
@@ -58,6 +58,46 @@ On the DMX Core:
 That's it — within a few seconds the device appears in Home Assistant under
 Settings → Devices & Services → MQTT.
 
+#### Plugin settings
+
+All of these live under **Settings → Plugins → Home Assistant**.
+
+| Setting | What it does |
+|---|---|
+| **Discovery prefix** | MQTT discovery prefix. Leave at `homeassistant` unless you changed it in HA. |
+| **Expose presets, cues, and timelines** / **schedules** / **zones** / **Control Values** / **system entities** | Per-category toggles. Off hides that whole group from HA. |
+| **Only these presets, cues, and timelines** | Optional allow-list. Empty publishes every look (when the category is on). |
+| **Home Assistant URL** | Base URL of HA (e.g. `https://192.168.1.27:8123`). Required for Output Events and **HA scene when playback stops**. Leave empty if you only need HA to control the device. HTTP should only be used on a deliberately trusted development network. |
+| **Long-lived access token** | Token from HA **profile → Security**. Required with the URL. |
+| **HA scene when playback stops** | Optional scene, script, or automation (friendly name or entity id) fired after a short settle when a cue ends, Now Playing is idle, or Stop is pressed. |
+| **Home Assistant MQTT broker** / **port** / **username** / **password** / **TLS** | Optional second broker. Fill these in when the Core's Remote Control MQTT server is *not* HA's Mosquitto. Leave the broker empty to use only the Core MQTT server. |
+
+#### Choosing which looks appear in Home Assistant
+
+By default every preset, cue, and timeline is published as an HA scene.
+Use **Settings → Plugins → Home Assistant**:
+
+1. Turn **Expose presets, cues, and timelines** off to hide the whole
+   category (schedules, zones, Control Values, and system entities have
+   their own toggles).
+2. Leave it on and fill **Only these presets, cues, and timelines** to
+   publish a subset. Separate entries with commas, semicolons, or new
+   lines. Each entry can be a display name, a full code, or a shortcode:
+
+   ```
+   Movie Night, preset.PARTY
+   cue.SUNSET
+   ```
+
+   Leave the list empty to publish all looks.
+
+#### Optional: a separate Home Assistant MQTT broker
+
+If the Core's Remote Control MQTT broker is **not** Home Assistant's
+Mosquitto, set **Home Assistant MQTT broker** (and port, credentials, TLS
+if needed). Discovery is then published to both brokers. Leave the broker
+field empty to use only the Core MQTT server.
+
 #### Triggering Home Assistant from the DMX Core (optional)
 
 This direction uses Home Assistant's REST API, so the device needs to know
@@ -67,8 +107,9 @@ where HA is and have a token:
    **Long-lived access token** (name it e.g. `DMX Core`). Copy it — HA shows
    it only once.
 2. On the DMX Core web UI, **Settings → Plugins → Home Assistant**: enter
-   the **Home Assistant URL** (e.g. `http://homeassistant.local:8123`) and
-   paste the token into **Long-lived access token**. The plugin status shows
+   the **Home Assistant URL** (e.g. `https://192.168.1.27:8123`) and paste
+   the token into **Long-lived access token**. Use HTTP only on a
+   deliberately trusted development network. The plugin status shows
    *HA API ok* once the token is accepted.
 3. **Input/Output → Output Events → New**: set the type to **Home
    Assistant** and pick the scene, script, or automation from the **Target**
@@ -86,6 +127,12 @@ shows up in the target list.
 If HA is unreachable when an event fires, the rest of the button's work
 (playing a cue, etc.) still happens; the failure is logged and shown by the
 Test button.
+
+Optional: **HA scene when playback stops** fires a chosen HA scene, script,
+or automation after a short settle when a cue ends, Now Playing is idle, or
+Stop is pressed. Set it to a friendly name or entity id (for example
+`All Off` or `scene.all_off`). URL and token must already be set; if another
+cue starts during the settle, the stop scene is cancelled.
 
 ### Ideas
 
@@ -107,7 +154,8 @@ Test button.
 
 - No device in HA: check the MQTT integration is connected to the *same*
   broker as the DMX Core, and that the DMX Core web UI shows the plugin as
-  connected (Settings → Plugins).
+  connected (Settings → Plugins). If Core MQTT and HA's Mosquitto are
+  different brokers, fill in **Home Assistant MQTT broker**.
 - Entities show unavailable: the broker lost the device — check network and
   the Remote Control MQTT settings. The device reconnects automatically.
 - Deleted a preset but it lingers in HA: it is removed automatically on the
@@ -117,7 +165,11 @@ Test button.
 - Output Event target list is empty / shows "Could not load targets": the
   device can't reach the HA URL (check it opens from a browser on the same
   network, including the port) or the plugin is disabled. You can still
-  type the entity id (e.g. `scene.movie_night`) by hand.
+  type the entity id (e.g. `scene.movie_night`) by hand. Prefer an IPv4
+  address if `homeassistant.local` does not resolve on the device.
+- **HA scene when playback stops** does nothing: URL and token must be set,
+  the value must match a scene/script/automation name or entity id, and a
+  new cue starting during the settle cancels it.
 
 ## Development
 
@@ -129,8 +181,10 @@ dotnet test tests/DMXCore100.HomeAssistantPlugin.Tests
 `tools/DMXCore100.HomeAssistantPlugin.DevHost` is an interactive console
 harness (F5 in Visual Studio) against an in-memory host — simulate HA birth
 messages, commands, and state changes without a device or broker. Pass
-`<url> <token>` (or use the `ha` command) to point the Core→HA side at a
-real Home Assistant and try `targets` / `fire scene.xyz`.
+`<url>` (or use the `ha` command) to point the Core→HA side at a real Home
+Assistant; the long-lived token is read from the `HA_TOKEN` environment
+variable or a masked prompt, never from the command line. Then try
+`targets` / `fire scene.xyz`.
 
 Requires SDK contract **1.7** (`IPluginHost.Actions`). Until that SDK
 version is on nuget.org, pack it from the Software repo into `local-feed/`

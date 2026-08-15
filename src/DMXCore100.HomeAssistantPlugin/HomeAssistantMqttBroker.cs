@@ -21,9 +21,10 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
     private readonly string? username;
     private readonly string? password;
     private readonly bool useTls;
-    private readonly bool ignoreCertificates;
     private readonly Func<MqttMessage, CancellationToken, Task> onMessage;
+    private readonly Func<CancellationToken, Task>? onConnected;
     private readonly CancellationTokenSource lifetime = new();
+    private readonly SemaphoreSlim connectGate = new(1, 1);
 
     public HomeAssistantMqttBroker(
         IPluginHost host,
@@ -32,8 +33,8 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
         string? username,
         string? password,
         bool useTls,
-        bool ignoreCertificates,
-        Func<MqttMessage, CancellationToken, Task> onMessage)
+        Func<MqttMessage, CancellationToken, Task> onMessage,
+        Func<CancellationToken, Task>? onConnected = null)
     {
         this.host = host;
         this.server = server;
@@ -41,8 +42,8 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
         this.username = username;
         this.password = password;
         this.useTls = useTls;
-        this.ignoreCertificates = ignoreCertificates;
         this.onMessage = onMessage;
+        this.onConnected = onConnected;
         this.client = new MqttFactory().CreateMqttClient();
         this.client.ApplicationMessageReceivedAsync += HandleMessageAsync;
         this.client.DisconnectedAsync += HandleDisconnectedAsync;
@@ -53,7 +54,31 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.lifetime.Token);
-        await ConnectWithRetryAsync(linked.Token);
+        await this.connectGate.WaitAsync(linked.Token);
+        try
+        {
+            await ConnectAsync(linked.Token);
+            await NotifyConnectedAsync(linked.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
+            _ = RetryUntilCanceledAsync();
+        }
+        finally
+        {
+            try
+            {
+                this.connectGate.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
     }
 
     public async Task PublishAsync(string topic, string payload, bool retain, CancellationToken cancellationToken)
@@ -90,6 +115,7 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
 
         this.client.Dispose();
         this.lifetime.Dispose();
+        this.connectGate.Dispose();
     }
 
     private async Task ConnectAsync(CancellationToken cancellationToken)
@@ -112,21 +138,13 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
 
         if (this.useTls)
         {
-            options = options.WithTlsOptions(tls =>
-            {
-                tls.UseTls();
-                if (this.ignoreCertificates)
-                {
-                    tls.WithCertificateValidationHandler(_ => true);
-                }
-            });
+            options = options.WithTlsOptions(tls => tls.UseTls());
         }
 
         await this.client.ConnectAsync(options.Build(), cancellationToken);
 
         string prefix = (this.host.Settings.GetString("discovery-prefix") ?? "homeassistant").Trim().TrimEnd('/');
         await this.client.SubscribeAsync($"dmxcore/{serial}/+/set", MqttQualityOfServiceLevel.AtLeastOnce);
-        await this.client.SubscribeAsync($"dmxcore/{serial}/ha-scene/+/set", MqttQualityOfServiceLevel.AtLeastOnce);
         await this.client.SubscribeAsync($"{prefix}/status", MqttQualityOfServiceLevel.AtLeastOnce);
 
         await PublishAsync(this.host.Mqtt.DeviceAvailabilityTopic, "online", retain: true, cancellationToken);
@@ -135,24 +153,65 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
         this.host.Logger.LogInformation("Connected to Home Assistant MQTT broker {Server}:{Port}", this.server, this.port);
     }
 
+    private async Task NotifyConnectedAsync(CancellationToken cancellationToken)
+    {
+        if (this.onConnected != null)
+        {
+            await this.onConnected(cancellationToken);
+        }
+    }
+
+    private async Task RetryUntilCanceledAsync()
+    {
+        try
+        {
+            await ConnectWithRetryAsync(this.lifetime.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
     private async Task ConnectWithRetryAsync(CancellationToken cancellationToken)
     {
-        while (true)
+        await this.connectGate.WaitAsync(cancellationToken);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    if (!this.client.IsConnected)
+                    {
+                        await ConnectAsync(cancellationToken);
+                    }
+
+                    await NotifyConnectedAsync(cancellationToken);
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
+                    await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+                }
+            }
+        }
+        finally
+        {
             try
             {
-                await ConnectAsync(cancellationToken);
-                return;
+                this.connectGate.Release();
             }
-            catch (OperationCanceledException)
+            catch (ObjectDisposedException)
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
-                await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
             }
         }
     }
@@ -190,6 +249,9 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
             await ConnectWithRetryAsync(this.lifetime.Token);
         }
         catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
         {
         }
     }

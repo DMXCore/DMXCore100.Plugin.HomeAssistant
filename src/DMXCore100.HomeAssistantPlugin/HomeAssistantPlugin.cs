@@ -33,20 +33,29 @@ public class HomeAssistantPlugin : IPlugin
 {
     private const string DiscoveryPrefixKey = "discovery-prefix";
     private const string ExposeScenesKey = "expose-scenes";
+    private const string ExposedLooksKey = "exposed-looks";
     private const string ExposeSchedulesKey = "expose-schedules";
     private const string ExposeZonesKey = "expose-zones";
     private const string ExposeControlValuesKey = "expose-control-values";
     private const string ExposeSystemKey = "expose-system";
     private const string HaUrlKey = "ha-url";
     private const string HaTokenKey = "ha-token";
+    private const string StopHaSceneKey = "stop-ha-scene";
+    private const string HaMqttBrokerKey = "ha-mqtt-broker";
+    private const string HaMqttPortKey = "ha-mqtt-port";
+    private const string HaMqttUsernameKey = "ha-mqtt-username";
+    private const string HaMqttPasswordKey = "ha-mqtt-password";
+    private const string HaMqttTlsKey = "ha-mqtt-tls";
 
     private IPluginHost host = null!;
     private readonly List<IDisposable> subscriptions = [];
+    private readonly HomeAssistantMqttFactory? mqttFactory;
     private IDisposable? statusSubscription;
     private string statusPrefix = "";
 
     // Core→HA REST side: present only while URL + token are configured
     private HaRestClient? restClient;
+    private HaActionProvider? actionProvider;
     private IDisposable? actionProviderHandle;
     private IDisposable? restHealthSchedule;
     private string restConfigKey = "";
@@ -54,9 +63,30 @@ public class HomeAssistantPlugin : IPlugin
     private bool? restHealthy;
     private string? restHealthDetail;
 
+    private IHomeAssistantMqttBroker? haMqtt;
+    private string haMqttConfigKey = "";
+    private CancellationTokenSource? stopSceneDelay;
+
     // Entities currently published to HA, keyed by objectId (rebuilt by every
     // PublishAll; commands and state changes resolve through this)
     private Dictionary<string, PluginEntity> published = new(StringComparer.OrdinalIgnoreCase);
+
+    public HomeAssistantPlugin()
+        : this(null)
+    {
+    }
+
+    internal HomeAssistantPlugin(HomeAssistantMqttFactory? mqttFactory)
+    {
+        this.mqttFactory = mqttFactory;
+    }
+
+    internal TimeSpan StopSceneSettle { get; set; } = TimeSpan.FromMilliseconds(400);
+
+    internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } =
+        static (delay, cancellationToken) => Task.Delay(delay, cancellationToken);
+
+    internal HttpMessageHandler? RestHandler { get; set; }
 
     public PluginInfo Info { get; } = new()
     {
@@ -83,6 +113,13 @@ public class HomeAssistantPlugin : IPlugin
                 Label = "Expose presets, cues, and timelines",
                 Type = PluginSettingType.Boolean,
                 DefaultValue = "true",
+            },
+            new()
+            {
+                Key = ExposedLooksKey,
+                Label = "Only these presets, cues, and timelines",
+                Type = PluginSettingType.String,
+                Description = "Comma or newline separated names or codes. Empty publishes every look when the category is on.",
             },
             new()
             {
@@ -117,7 +154,7 @@ public class HomeAssistantPlugin : IPlugin
                 Key = HaUrlKey,
                 Label = "Home Assistant URL",
                 Type = PluginSettingType.String,
-                Description = "Lets the device fire HA scenes, scripts, and automations (Output Events of type Home Assistant). E.g. http://homeassistant.local:8123 — leave empty if you only need HA to control the device.",
+                Description = "Lets the device fire HA scenes, scripts, and automations (Output Events of type Home Assistant). E.g. https://homeassistant.local:8123 — leave empty if you only need HA to control the device.",
             },
             new()
             {
@@ -127,6 +164,47 @@ public class HomeAssistantPlugin : IPlugin
                 Secret = true,
                 Description = "Create one in Home Assistant under your profile → Security → Long-lived access tokens",
             },
+            new()
+            {
+                Key = StopHaSceneKey,
+                Label = "HA scene when playback stops",
+                Type = PluginSettingType.String,
+                Description = "Optional scene, script, or automation (friendly name or entity id) fired after a short settle when a cue ends, Now Playing is idle, or Stop is pressed",
+            },
+            new()
+            {
+                Key = HaMqttBrokerKey,
+                Label = "Home Assistant MQTT broker",
+                Type = PluginSettingType.String,
+                Description = "Optional. Hostname of Home Assistant's Mosquitto when the Core MQTT connection is a different broker. Leave empty to use only the Core MQTT server.",
+            },
+            new()
+            {
+                Key = HaMqttPortKey,
+                Label = "Home Assistant MQTT port",
+                Type = PluginSettingType.Integer,
+                DefaultValue = "1883",
+            },
+            new()
+            {
+                Key = HaMqttUsernameKey,
+                Label = "Home Assistant MQTT username",
+                Type = PluginSettingType.String,
+            },
+            new()
+            {
+                Key = HaMqttPasswordKey,
+                Label = "Home Assistant MQTT password",
+                Type = PluginSettingType.String,
+                Secret = true,
+            },
+            new()
+            {
+                Key = HaMqttTlsKey,
+                Label = "Home Assistant MQTT TLS",
+                Type = PluginSettingType.Boolean,
+                DefaultValue = "false",
+            },
         ],
     };
 
@@ -134,7 +212,7 @@ public class HomeAssistantPlugin : IPlugin
 
     private string DiscoveryPrefix => (this.host.Settings.GetString(DiscoveryPrefixKey) ?? "homeassistant").Trim().TrimEnd('/');
 
-    public Task InitializeAsync(IPluginHost host, CancellationToken cancellationToken)
+    public async Task InitializeAsync(IPluginHost host, CancellationToken cancellationToken)
     {
         this.host = host;
 
@@ -148,17 +226,18 @@ public class HomeAssistantPlugin : IPlugin
         this.subscriptions.Add(host.Entities.OnStateChanged(HandleEntityState));
         this.subscriptions.Add(host.Entities.OnCatalogChanged(HandleCatalogChanged));
         this.subscriptions.Add(host.Settings.OnChanged(HandleSettingsChanged));
+        this.subscriptions.Add(host.Playback.OnCueStarted(HandleCueStarted));
+        this.subscriptions.Add(host.Playback.OnCueEnded(HandleCueEnded));
 
         // Last: the initial callback (current state first) kicks off the
         // first PublishAll when the broker is already connected
         this.subscriptions.Add(host.Mqtt.OnConnectionChanged(HandleConnectionChanged));
 
-        ConfigureRestProvider();
-
-        return Task.CompletedTask;
+        await ConfigureRestProviderAsync(cancellationToken);
+        await ConfigureHaMqttAsync(cancellationToken);
     }
 
-    public Task ShutdownAsync(CancellationToken cancellationToken)
+    public async Task ShutdownAsync(CancellationToken cancellationToken)
     {
         foreach (var subscription in this.subscriptions)
         {
@@ -166,9 +245,9 @@ public class HomeAssistantPlugin : IPlugin
         }
 
         this.statusSubscription?.Dispose();
+        CancelStopScene();
         TearDownRestProvider();
-
-        return Task.CompletedTask;
+        await TearDownHaMqttAsync();
     }
 
     /// <summary>
@@ -177,7 +256,7 @@ public class HomeAssistantPlugin : IPlugin
     /// rebuild when they change. Runs a health check so a bad URL or token
     /// shows on the Plugins page without waiting for the first Output Event.
     /// </summary>
-    private void ConfigureRestProvider()
+    private async Task ConfigureRestProviderAsync(CancellationToken cancellationToken)
     {
         string url = (this.host.Settings.GetString(HaUrlKey) ?? string.Empty).Trim();
         string token = (this.host.Settings.GetString(HaTokenKey) ?? string.Empty).Trim();
@@ -200,7 +279,7 @@ public class HomeAssistantPlugin : IPlugin
 
         try
         {
-            this.restClient = new HaRestClient(url, token);
+            this.restClient = new HaRestClient(url, token, this.RestHandler);
         }
         catch (Exception ex)
         {
@@ -212,12 +291,20 @@ public class HomeAssistantPlugin : IPlugin
             return;
         }
 
-        var provider = new HaActionProvider(this.restClient, ReportRestHealth);
+        var client = this.restClient;
+        var provider = new HaActionProvider(client, ReportRestHealth);
+        this.actionProvider = provider;
         this.actionProviderHandle = this.host.Actions.RegisterProvider(provider);
-        this.host.Logger.LogInformation("Home Assistant REST API configured at {Url}; scenes/scripts/automations available as Output Event targets", this.restClient.BaseAddress);
+        this.host.Logger.LogInformation("Home Assistant REST API configured at {Url}; scenes/scripts/automations available as Output Event targets", client.BaseAddress);
 
         // Immediate check, then a slow periodic re-check so a recovered HA
         // (or a revoked token) is reflected without user action
+        await CheckRestHealth(cancellationToken);
+        if (!ReferenceEquals(client, this.restClient))
+        {
+            return;
+        }
+
         this.restHealthSchedule = this.host.SchedulePeriodic(TimeSpan.FromMinutes(5), CheckRestHealth);
         ReportStatus();
     }
@@ -228,8 +315,10 @@ public class HomeAssistantPlugin : IPlugin
         this.restHealthSchedule = null;
         this.actionProviderHandle?.Dispose();
         this.actionProviderHandle = null;
-        this.restClient?.Dispose();
+        this.actionProvider = null;
+        HaRestClient? client = this.restClient;
         this.restClient = null;
+        client?.Dispose();
         this.restHealthy = null;
         this.restHealthDetail = null;
         this.restConfigKey = string.Empty;
@@ -246,10 +335,20 @@ public class HomeAssistantPlugin : IPlugin
         try
         {
             await client.CheckAsync(cancellationToken);
+            if (!ReferenceEquals(client, this.restClient))
+            {
+                return;
+            }
+
             ReportRestHealth(true, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (!ReferenceEquals(client, this.restClient))
+            {
+                return;
+            }
+
             ReportRestHealth(false, ex.Message);
         }
     }
@@ -282,8 +381,12 @@ public class HomeAssistantPlugin : IPlugin
     /// </summary>
     private void ReportStatus()
     {
-        bool mqttOk = this.host.Mqtt.IsConnected;
+        bool mqttOk = this.host.Mqtt.IsConnected || this.haMqtt is { IsConnected: true };
         string detail = mqttOk ? $"{this.publishedCount} entities published" : "MQTT broker not connected";
+        if (this.haMqtt is { IsConnected: true })
+        {
+            detail += "; HA MQTT connected";
+        }
 
         if (this.restConfigKey.Length > 0)
         {
@@ -327,18 +430,19 @@ public class HomeAssistantPlugin : IPlugin
         return PublishAll(cancellationToken);
     }
 
-    private Task HandleSettingsChanged(CancellationToken cancellationToken)
+    private async Task HandleSettingsChanged(CancellationToken cancellationToken)
     {
         if (!string.Equals(this.statusPrefix, DiscoveryPrefix, StringComparison.Ordinal))
         {
             SubscribeStatusTopic();
         }
 
-        ConfigureRestProvider();
+        await ConfigureRestProviderAsync(cancellationToken);
+        await ConfigureHaMqttAsync(cancellationToken);
 
         // PublishAll clears configs left under a previous prefix via the
         // persisted publish record
-        return PublishAll(cancellationToken);
+        await PublishAll(cancellationToken);
     }
 
     /// <summary>
@@ -348,7 +452,7 @@ public class HomeAssistantPlugin : IPlugin
     /// </summary>
     private async Task PublishAll(CancellationToken cancellationToken)
     {
-        if (!this.host.Mqtt.IsConnected)
+        if (!this.host.Mqtt.IsConnected && this.haMqtt is not { IsConnected: true })
         {
             return;
         }
@@ -387,9 +491,9 @@ public class HomeAssistantPlugin : IPlugin
 
             if (!stillPublished)
             {
-                await this.host.Mqtt.PublishAsync(
+                await PublishRetainedAsync(
                     Discovery.ConfigTopic(record.Prefix, entry.Component, Serial, entry.ObjectId),
-                    string.Empty, retain: true, MqttQos.AtLeastOnce, cancellationToken);
+                    string.Empty, cancellationToken);
             }
         }
 
@@ -398,18 +502,17 @@ public class HomeAssistantPlugin : IPlugin
         {
             string component = Discovery.Component(entity.Kind);
 
-            await this.host.Mqtt.PublishAsync(
+            await PublishRetainedAsync(
                 Discovery.ConfigTopic(prefix, component, Serial, objectId),
                 Discovery.ConfigPayload(this.host, Serial, objectId, entity),
-                retain: true, MqttQos.AtLeastOnce, cancellationToken);
+                cancellationToken);
 
             var state = await this.host.Entities.GetStateAsync(entity.Code, cancellationToken);
             string? stateValue = Discovery.StateValue(entity.Kind, state);
             if (stateValue != null)
             {
-                await this.host.Mqtt.PublishAsync(
-                    Discovery.StateTopic(Serial, objectId), stateValue,
-                    retain: true, MqttQos.AtLeastOnce, cancellationToken);
+                await PublishRetainedAsync(
+                    Discovery.StateTopic(Serial, objectId), stateValue, cancellationToken);
             }
         }
 
@@ -424,7 +527,19 @@ public class HomeAssistantPlugin : IPlugin
 
     private async Task HandleEntityState(PluginEntityState state, CancellationToken cancellationToken)
     {
-        if (!this.host.Mqtt.IsConnected)
+        if (string.Equals(state.Code, "system.nowplaying", StringComparison.OrdinalIgnoreCase))
+        {
+            if (IsIdlePlayback(state.Text))
+            {
+                ScheduleStopScene();
+            }
+            else
+            {
+                CancelStopScene();
+            }
+        }
+
+        if (!this.host.Mqtt.IsConnected && this.haMqtt is not { IsConnected: true })
         {
             return;
         }
@@ -438,8 +553,7 @@ public class HomeAssistantPlugin : IPlugin
         string? stateValue = Discovery.StateValue(entity.Kind, state);
         if (stateValue != null)
         {
-            await this.host.Mqtt.PublishAsync(Discovery.StateTopic(Serial, objectId), stateValue,
-                retain: true, MqttQos.AtLeastOnce, cancellationToken);
+            await PublishRetainedAsync(Discovery.StateTopic(Serial, objectId), stateValue, cancellationToken);
         }
     }
 
@@ -469,6 +583,244 @@ public class HomeAssistantPlugin : IPlugin
         }
 
         await this.host.Entities.ExecuteAsync(entity.Code, command, cancellationToken);
+
+        if (string.Equals(entity.Code, "system.stop", StringComparison.OrdinalIgnoreCase))
+        {
+            ScheduleStopScene();
+        }
+    }
+
+    private Task HandleHaMqttMessage(MqttMessage message, CancellationToken cancellationToken)
+    {
+        if (message.Topic.EndsWith("/status", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleHaStatus(message, cancellationToken);
+        }
+
+        return HandleCommand(message, cancellationToken);
+    }
+
+    private async Task PublishRetainedAsync(string topic, string payload, CancellationToken cancellationToken)
+    {
+        Exception? first = null;
+        if (this.host.Mqtt.IsConnected)
+        {
+            try
+            {
+                await this.host.Mqtt.PublishAsync(topic, payload, retain: true, MqttQos.AtLeastOnce, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                first = ex;
+            }
+        }
+
+        if (this.haMqtt is { IsConnected: true })
+        {
+            try
+            {
+                await this.haMqtt.PublishAsync(topic, payload, retain: true, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                first ??= ex;
+            }
+        }
+
+        if (first != null)
+        {
+            throw first;
+        }
+    }
+
+    private async Task ConfigureHaMqttAsync(CancellationToken cancellationToken)
+    {
+        string? broker = this.host.Settings.GetString(HaMqttBrokerKey);
+        broker = string.IsNullOrWhiteSpace(broker) ? null : broker.Trim();
+        int port = this.host.Settings.GetInteger(HaMqttPortKey) ?? 1883;
+        string? username = this.host.Settings.GetString(HaMqttUsernameKey);
+        string? password = this.host.Settings.GetString(HaMqttPasswordKey);
+        bool tls = this.host.Settings.GetBoolean(HaMqttTlsKey) == true;
+        string key = this.mqttFactory != null
+            ? "factory"
+            : broker == null ? "" : $"{broker}\n{port}\n{username}\n{password}\n{tls}";
+
+        if (string.Equals(key, this.haMqttConfigKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        await TearDownHaMqttAsync();
+        this.haMqttConfigKey = key;
+
+        if (this.mqttFactory != null)
+        {
+            this.haMqtt = this.mqttFactory(this.host);
+        }
+        else if (broker != null)
+        {
+            this.haMqtt = new HomeAssistantMqttBroker(
+                this.host, broker, port, username, password, tls, HandleHaMqttMessage, PublishAll);
+        }
+
+        if (this.haMqtt == null)
+        {
+            ReportStatus();
+            return;
+        }
+
+        try
+        {
+            await this.haMqtt.StartAsync(cancellationToken);
+            await PublishAll(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            this.host.Logger.LogWarning(ex, "Home Assistant MQTT broker connection failed");
+        }
+
+        ReportStatus();
+    }
+
+    private async Task TearDownHaMqttAsync()
+    {
+        if (this.haMqtt != null)
+        {
+            await this.haMqtt.DisposeAsync();
+            this.haMqtt = null;
+        }
+
+        this.haMqttConfigKey = string.Empty;
+    }
+
+    private Task HandleCueStarted(CuePlaybackEvent evt, CancellationToken cancellationToken)
+    {
+        CancelStopScene();
+        return Task.CompletedTask;
+    }
+
+    private Task HandleCueEnded(CuePlaybackEvent evt, CancellationToken cancellationToken)
+    {
+        ScheduleStopScene();
+        return Task.CompletedTask;
+    }
+
+    private void CancelStopScene()
+    {
+        CancellationTokenSource? delay = this.stopSceneDelay;
+        this.stopSceneDelay = null;
+        if (delay == null)
+        {
+            return;
+        }
+
+        delay.Cancel();
+        delay.Dispose();
+    }
+
+    private void ScheduleStopScene()
+    {
+        CancelStopScene();
+        if (string.IsNullOrWhiteSpace(this.host.Settings.GetString(StopHaSceneKey)))
+        {
+            return;
+        }
+
+        var delay = new CancellationTokenSource();
+        this.stopSceneDelay = delay;
+        _ = ActivateStopSceneAfterSettleAsync(delay.Token);
+    }
+
+    private async Task ActivateStopSceneAfterSettleAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await this.DelayAsync(this.StopSceneSettle, cancellationToken);
+            await ActivateConfiguredStopSceneAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            this.host.Logger.LogWarning(ex, "HA scene when playback stops failed");
+        }
+    }
+
+    private async Task ActivateConfiguredStopSceneAsync(CancellationToken cancellationToken)
+    {
+        string? configured = this.host.Settings.GetString(StopHaSceneKey);
+        var provider = this.actionProvider;
+        if (provider == null || string.IsNullOrWhiteSpace(configured))
+        {
+            return;
+        }
+
+        configured = configured.Trim();
+        if (IsSupportedEntityId(configured))
+        {
+            await provider.ExecuteAsync(configured, payload: null, cancellationToken);
+            this.host.Logger.LogInformation("Activated Home Assistant {Id} on stop", configured);
+            return;
+        }
+
+        IReadOnlyList<PluginActionTarget> targets = await provider.GetTargetsAsync(cancellationToken);
+        PluginActionTarget? target = targets.FirstOrDefault(item =>
+            string.Equals(item.Id, configured, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(item.Label, configured, StringComparison.OrdinalIgnoreCase));
+        if (target == null)
+        {
+            this.host.Logger.LogInformation(
+                "No Home Assistant target matched stop setting '{Setting}'", configured);
+            return;
+        }
+
+        await provider.ExecuteAsync(target.Id, payload: null, cancellationToken);
+        this.host.Logger.LogInformation("Activated Home Assistant {Id} ({Label}) on stop", target.Id, target.Label);
+    }
+
+    private static bool IsSupportedEntityId(string value)
+    {
+        int dot = value.IndexOf('.');
+        if (dot <= 0 || dot == value.Length - 1)
+        {
+            return false;
+        }
+
+        string domain = value[..dot];
+        return HaRestClient.TargetDomains.Any(item =>
+            string.Equals(item.Domain, domain, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsIdlePlayback(string? nowPlaying)
+    {
+        string text = (nowPlaying ?? "").Trim();
+        if (text.Length == 0 || text == "-")
+        {
+            return true;
+        }
+
+        foreach (string prefix in new[] { "Cue:", "Preset:", "Timeline:" })
+        {
+            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                text = text[prefix.Length..].Trim();
+                break;
+            }
+        }
+
+        return text.Length == 0
+            || text.Equals("stopped", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("idle", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("none", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("off", StringComparison.OrdinalIgnoreCase);
     }
 
     private static PluginEntityCommand? ParseCommand(PluginEntityKind kind, string payload)
@@ -518,6 +870,17 @@ public class HomeAssistantPlugin : IPlugin
         };
 
         // Unknown (future) namespaces default to exposed
-        return settingKey == null || this.host.Settings.GetBoolean(settingKey) != false;
+        if (settingKey != null && this.host.Settings.GetBoolean(settingKey) == false)
+        {
+            return false;
+        }
+
+        if (ExposedLooks.IsLook(entity)
+            && !ExposedLooks.Matches(entity, ExposedLooks.Parse(this.host.Settings.GetString(ExposedLooksKey))))
+        {
+            return false;
+        }
+
+        return true;
     }
 }

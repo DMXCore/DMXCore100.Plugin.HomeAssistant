@@ -60,7 +60,7 @@ internal static class ExposedLooks
         }
 
         return string.Equals(LocalId(entity.Code), token, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(HomeAssistantScene.Slug(entity.Name), HomeAssistantScene.Slug(token), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(Discovery.ObjectId(entity.Name), Discovery.ObjectId(token), StringComparison.OrdinalIgnoreCase)
             || string.Equals(Discovery.ObjectId(entity.Code), Discovery.ObjectId(token), StringComparison.OrdinalIgnoreCase);
     }
 
