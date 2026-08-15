@@ -1,24 +1,24 @@
 # DMX Core 100 — Home Assistant Plugin
 
-Two-way Home Assistant integration:
+Built-in plugin that connects the device and Home Assistant in both
+directions:
 
-1. **The Core appears in Home Assistant** — presets, cues, dimmers, and
-   switches are published with
-   [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery).
-   No custom component and no YAML. openHAB, ioBroker, and Domoticz consume
-   the same discovery format.
-2. **Home Assistant scenes appear on the Core** — the plugin lists HA
-   `scene.*` entities and can fire them when you start a matching cue or
-   preset, when playback stops, or via MQTT.
+- **HA → DMX Core:** publishes the device's entities to Home Assistant via
+  [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery).
+  No custom component and no YAML on the Home Assistant side — entities
+  appear automatically, grouped under one device. openHAB, ioBroker, and
+  Domoticz consume the same discovery format.
+- **DMX Core → HA:** fire Home Assistant scenes, scripts, and automations
+  from the device — from a Stream Deck key, a touchscreen custom menu, an
+  input trigger, a timeline, or a script — through HA's REST API.
 
 ## User guide
 
 *(Source for the docs.dmxcore.com "Home Assistant" section.)*
 
-### What you get in Home Assistant
+### What you get
 
-Once MQTT discovery is connected, Home Assistant shows one **DMX Core 100
-device** with:
+Once connected, Home Assistant shows one **DMX Core 100 device** with:
 
 | In Home Assistant | From the DMX Core | What you can do |
 |---|---|---|
@@ -33,162 +33,91 @@ Everything updates live in both directions: move a fader on the device and
 the HA slider follows; change it in HA and the device follows. If the device
 goes offline (or this plugin is disabled) the entities show as *unavailable*.
 
-### What you get on the Core
+And in the other direction, the DMX Core can trigger Home Assistant:
 
-With a Home Assistant URL and long-lived access token, the plugin polls HA
-every 30 seconds and keeps a list of scenes. The Plugins page shows how
-many were found (for example `12 HA scenes`).
+| On the DMX Core | In Home Assistant |
+|---|---|
+| An **Output Event** of type *Home Assistant*, bound to any button (Stream Deck, MIDI, custom menu), input trigger, timeline event, or script | Activates a **scene**, runs a **script**, or triggers an **automation** — picked from a live list, no ids to type |
 
-You can fire those scenes from the Core:
-
-- **Name match** (on by default) — start a cue or preset whose **display
-  name** matches the HA scene. A Core preset called Movie Night fires HA
-  `scene.movie_night`. The Core shortcode does not have to match. Cues are
-  matched when they start; presets are matched from Now Playing as well.
-- **When playback stops** — optional. Set **HA scene when playback stops**
-  to a friendly name or entity id (for example `All Off` or
-  `scene.all_off`). Fired after a short settle so a cue that ends into
-  another cue does not flash the stop look first. Independent of name-match
-  on cue start.
-- **MQTT** — publish `ON` to
-  `dmxcore/{serial}/ha-scene/{objectId}/set`
-  (`scene.movie_night` → object id `scene_movie_night`). Use a Core MQTT
-  output event if a dashboard or schedule should fire it.
-
-### Setup: Core entities in Home Assistant
+### Setup
 
 Prerequisites: an MQTT broker that both Home Assistant and the DMX Core can
-reach, and Home Assistant's **MQTT integration** connected to it
-(Settings → Devices & Services → Add Integration → MQTT). Most HA
-installs use the Mosquitto add-on.
+reach (most HA installs use the Mosquitto add-on), and Home Assistant's
+**MQTT integration** connected to it (Settings → Devices & Services → Add
+Integration → MQTT).
 
 On the DMX Core:
 
 1. Web UI → **Settings → Remote Control**: enable the external MQTT server
    and enter the broker's address, port, and credentials.
 2. **Settings → Plugins**: make sure the Home Assistant plugin is enabled
-   (it is by default). Optional: discovery prefix (leave at `homeassistant`
-   unless you changed it in HA) and the expose settings below.
+   (it is by default). Optional settings: the discovery prefix (leave at
+   `homeassistant` unless you changed it in HA) and per-category expose
+   toggles if you don't want e.g. every cue showing up in HA.
 
-Within a few seconds the device appears in Home Assistant under
+That's it — within a few seconds the device appears in Home Assistant under
 Settings → Devices & Services → MQTT.
 
-#### Choosing which looks appear in Home Assistant
+#### Triggering Home Assistant from the DMX Core (optional)
 
-By default every preset, cue, and timeline is published as an HA scene.
-Use **Settings → Plugins → Home Assistant**:
+This direction uses Home Assistant's REST API, so the device needs to know
+where HA is and have a token:
 
-1. Turn **Expose presets, cues, and timelines** off to hide the whole
-   category (schedules, zones, Control Values, and system entities have
-   their own toggles).
-2. Leave it on and fill **Only these presets, cues, and timelines** to
-   publish a subset. Separate entries with commas or new lines. Each
-   entry can be a display name, a full code, or a shortcode:
+1. In Home Assistant, open your **profile → Security** and create a
+   **Long-lived access token** (name it e.g. `DMX Core`). Copy it — HA shows
+   it only once.
+2. On the DMX Core web UI, **Settings → Plugins → Home Assistant**: enter
+   the **Home Assistant URL** (e.g. `http://homeassistant.local:8123`) and
+   paste the token into **Long-lived access token**. The plugin status shows
+   *HA API ok* once the token is accepted.
+3. **Input/Output → Output Events → New**: set the type to **Home
+   Assistant** and pick the scene, script, or automation from the **Target**
+   list. Save, and use **Test** to fire it once.
+4. Bind it anywhere an action can be configured — a control surface button,
+   a custom menu item, an input trigger, a timeline event, or
+   `fireOutputEvent("<code>")` in a script — using the **Fire Output Event**
+   action.
 
-   ```
-   Movie Night, preset.PARTY
-   cue.SUNSET
-   ```
+For scripts that take variables, put a JSON object in the Output Event's
+payload (e.g. `{"variables": {"level": 50}}`); it is merged into the service
+call. Anything else HA can do can be wrapped in an HA script, which then
+shows up in the target list.
 
-   Leave the list empty to publish all looks. Names are case-insensitive.
-   `PARTY` matches `preset.PARTY`; `cue.SUNSET` does not match
-   `preset.SUNSET`. Looks you remove from the list (or the catalog) are
-   unpublished on the next settings or catalog change.
-
-#### Optional: a separate Home Assistant MQTT broker
-
-The Core has one shared MQTT connection (Remote Control). If that broker
-**is** Home Assistant's Mosquitto, you are done — leave the plugin MQTT
-host empty.
-
-If the Core already uses a **different** broker (lighting, DSP, etc.) and
-HA has its own Mosquitto, fill in the plugin settings:
-
-| Setting | Typical value |
-|---|---|
-| Home Assistant MQTT broker | `homeassistant.local` (or the HA host IP) |
-| Home Assistant MQTT port | `1883` (`8883` if you enable TLS) |
-| Home Assistant MQTT username / password | Mosquitto add-on user |
-| Home Assistant MQTT TLS | off unless the broker requires it |
-
-Discovery, state, commands, and availability are then published to **both**
-brokers. Do not point this at the same server as Remote Control MQTT — that
-would open two connections to one broker.
-
-### Setup: Home Assistant scenes on the Core
-
-1. In Home Assistant, create a **long-lived access token** (user profile →
-   Long-Lived Access Tokens).
-2. On the Core, **Settings → Plugins → Home Assistant**:
-   - **Home Assistant URL** — `http://homeassistant.local:8123`. Leave empty
-     to pick up a server advertised on the LAN via mDNS.
-   - **Long-lived access token** — paste the token.
-   - **Ignore TLS certificate errors** — only if you use HTTPS with a
-     self-signed certificate.
-   - **Activate matching HA scenes when a cue starts** — on by default.
-   - **HA scene when playback stops** — optional look to restore when the
-     Core is idle (friendly name or `scene.*` id).
-3. Confirm the Plugins page reports HA scenes, not `HA unreachable`.
-
-Name matching uses the HA friendly name and the usual `scene.*` slug. Spaces
-become underscores: "Movie Night" matches `scene.movie_night`.
-
-### Plugin settings
-
-| Setting | Purpose |
-|---|---|
-| Home Assistant URL | REST/Web API for listing and activating HA scenes |
-| Long-lived access token | Required for scene control |
-| Ignore TLS certificate errors | HTTPS with an untrusted cert |
-| Home Assistant MQTT broker / port / user / password / TLS | Optional second broker for discovery |
-| Activate matching HA scenes when a cue starts | Name-match playback to HA scenes |
-| HA scene when playback stops | Scene to activate when cues end / Now Playing is idle |
-| Discovery prefix | MQTT discovery prefix (`homeassistant` unless you changed it in HA) |
-| Expose presets, cues, and timelines | Master switch for publishing Core looks as HA scenes |
-| Only these presets, cues, and timelines | Allow-list (names or codes, comma/newline separated). Empty = all looks when the toggle is on |
-| Expose schedules / zones / Control Values / system | Per-category toggles |
+If HA is unreachable when an event fires, the rest of the button's work
+(playing a cue, etc.) still happens; the failure is logged and shown by the
+Test button.
 
 ### Ideas
 
 - **Sunset ambiance:** HA automation at sunset → activate the `Evening`
-  preset on the Core (or let the Core's own sunrise/sunset schedules do it
-  and just flip the schedule switch from HA when you're on vacation).
-- **Movie night:** one HA script that dims living-room lights *and* a Core
-  preset named Movie Night that fires the matching HA scene the other way.
-- **Party button:** a dashboard button that fires a cue, sets the bar zone
-  to full, and switches the audio source Control Value to Spotify.
+  preset scene (or let the DMX Core's own sunrise/sunset schedules do it and
+  just flip the schedule switch from HA when you're on vacation).
+- **Movie night:** one HA script that dims your living room Hue lights *and*
+  sets the DMX Core master dimmer to 20%.
+- **Party button:** a dashboard button that fires a cue, sets the bar zone to
+  full, and switches the audio source Control Value to Spotify.
 - **Presence:** when the alarm arms (everyone left), stop playback and
   disable the schedules.
+- **Movie night, from the wall:** a Stream Deck key or touchscreen menu item
+  that plays the `Movie` preset *and* fires the HA scene that closes the
+  blinds and dims the Hue lights (two actions on one button, or one HA
+  script that does both).
 
 ### Troubleshooting
 
-- No device in HA: the MQTT integration must use the *same* broker the
-  Core publishes to (Remote Control MQTT, or the plugin's HA MQTT broker
-  if you filled that in). The Plugins page should show the plugin as
-  connected.
-- Entities show unavailable: the broker lost the device — check network
-  and MQTT settings. The device reconnects automatically.
-- Too many Core looks in HA: fill **Only these presets, cues, and
-  timelines**, or turn the category expose toggle off. Unlisted looks are
-  removed from HA on save.
-- A listed look never appears: the expose toggle must be on, and the
-  entry must match a display name, full code (`preset.PARTY`), or
-  shortcode (`PARTY`). Reload the MQTT integration if HA cached an old
-  discovery set.
-- Deleted a preset but it lingers in HA: it is removed automatically on
-  the next catalog change; if HA cached it, reload the MQTT integration.
-- Plugins page never shows HA scenes: URL, token, and network to HA port
-  8123. Leave URL empty only if HA is on the same LAN and advertises
-  mDNS. Check device logs for `HA: …` errors.
-- Cue or preset does not fire an HA scene: names must match (display name,
-  not the shortcode). Confirm the scene is in the discovered list. Device
-  logs list the HA scenes that were compared when nothing matched.
-- Stop scene never fires: fill in **HA scene when playback stops** (name or
-  `scene.*` id). It waits a fraction of a second so back-to-back cues do
-  not flash it. Check the discovered list if you used a friendly name.
-- Dual MQTT but HA still sees nothing: HA's MQTT integration must be
-  connected to the broker you entered on the plugin, not only the Core's
-  Remote Control broker.
+- No device in HA: check the MQTT integration is connected to the *same*
+  broker as the DMX Core, and that the DMX Core web UI shows the plugin as
+  connected (Settings → Plugins).
+- Entities show unavailable: the broker lost the device — check network and
+  the Remote Control MQTT settings. The device reconnects automatically.
+- Deleted a preset but it lingers in HA: it is removed automatically on the
+  next catalog change; if HA itself cached it, reload the MQTT integration.
+- Plugin status says *HA API: ... rejected the access token*: the token was
+  revoked or pasted incompletely — create a new one in your HA profile.
+- Output Event target list is empty / shows "Could not load targets": the
+  device can't reach the HA URL (check it opens from a browser on the same
+  network, including the port) or the plugin is disabled. You can still
+  type the entity id (e.g. `scene.movie_night`) by hand.
 
 ## Development
 
@@ -199,8 +128,13 @@ dotnet test tests/DMXCore100.HomeAssistantPlugin.Tests
 
 `tools/DMXCore100.HomeAssistantPlugin.DevHost` is an interactive console
 harness (F5 in Visual Studio) against an in-memory host — simulate HA birth
-messages, commands, state changes, and (with `ha <url> <token>`) a real
-Home Assistant scene list without a device.
+messages, commands, and state changes without a device or broker. Pass
+`<url> <token>` (or use the `ha` command) to point the Core→HA side at a
+real Home Assistant and try `targets` / `fire scene.xyz`.
+
+Requires SDK contract **1.7** (`IPluginHost.Actions`). Until that SDK
+version is on nuget.org, pack it from the Software repo into `local-feed/`
+(see `nuget.config`).
 
 Topic layout (`serial` = device hardware id, lowercase):
 
@@ -208,22 +142,10 @@ Topic layout (`serial` = device hardware id, lowercase):
 {prefix}/{component}/dmxcore-{serial}/{objectId}/config   retained discovery config
 dmxcore/{serial}/{objectId}/state                         retained state
 dmxcore/{serial}/{objectId}/set                           commands from HA
-dmxcore/{serial}/ha-scene/{objectId}/set                  activate an HA scene from the Core
 dmxcore/{serial}/availability                             device online/offline (host-managed last will)
 dmxcore/{serial}/plugin/home-assistant/availability       plugin online/offline (host-managed)
 ```
 
-On the optional Home Assistant MQTT broker, the same topics are published
-and subscribed (availability included) so HA can see the device there too.
-
-## Credits
-
-- [AlexWHughes](https://github.com/AlexWHughes) — bidirectional scene control,
-  optional Home Assistant MQTT broker, and expose allow-list.
-- [HakanL](https://github.com/HakanL) (Hakan Lindestaf) — original MQTT
-  Discovery plugin that publishes the Core into Home Assistant.
-- [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
-  — config, state, command, and availability topic layout.
-- [MQTTnet](https://github.com/dotnet/MQTTnet) — optional second MQTT client
-  when the Core Remote Control broker is not Home Assistant's.
-
+Every push to `main` recreates the rolling `latest` release carrying the
+packed `.dmxplugin`; the DMX Core 100 product build downloads it from there
+and bundles it as a built-in plugin.

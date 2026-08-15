@@ -8,25 +8,20 @@
     <!-- The SDK generates manifest.json and PluginBuildInfo from these -->
     <PluginId>home-assistant</PluginId>
     <PluginDisplayName>Home Assistant</PluginDisplayName>
-    <Version>1.2.1</Version>
+    <Version>1.1.0</Version>
     <Authors>DMX Core</Authors>
-    <!-- Floor: oldest SDK contract this plugin actually requires. mDNS URL
-         hints need 1.1; without this override the floor would default to the
-         contract of the SDK assembly we compile against. -->
-    <PluginMinSdkVersion>1.1</PluginMinSdkVersion>
+    <!-- Floor: oldest SDK contract this plugin actually requires (1.7 = output
+         action providers for the Core→HA direction). Without
+         this override the floor would default to the contract of the SDK
+         assembly we compile against, which is newer than we need. -->
+    <PluginMinSdkVersion>1.7</PluginMinSdkVersion>
   </PropertyGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="DMXCore100.HomeAssistantPlugin.Tests" />
-    <InternalsVisibleTo Include="DMXCore100.HomeAssistantPlugin.DevHost" />
-  </ItemGroup>
 
   <ItemGroup>
     <!-- ExcludeAssets="runtime": the DMX Core 100 host provides the SDK (and
          its dependencies) at runtime and always resolves them to its own
          copies, so they must not be shipped inside the .dmxplugin. -->
     <PackageReference Include="DMXCore.PluginSdk" Version="1.*" ExcludeAssets="runtime" />
-    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
   </ItemGroup>
 
 </Project>
