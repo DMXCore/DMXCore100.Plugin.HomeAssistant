@@ -5,11 +5,19 @@ using Microsoft.Extensions.Logging;
 namespace DMXCore100.HomeAssistantPlugin;
 
 /// <summary>
-/// Home Assistant MQTT Discovery integration: mirrors the device's entity
-/// catalog (presets, cues, timelines, schedules, zones, Control Values,
-/// system state) onto the configured MQTT broker so Home Assistant creates
-/// the corresponding entities automatically, grouped under one device.
-/// openHAB, ioBroker, and Domoticz consume the same discovery format.
+/// Home Assistant integration, both directions:
+/// <list type="bullet">
+/// <item>HA→Core (MQTT Discovery): mirrors the device's entity catalog
+/// (presets, cues, timelines, schedules, zones, Control Values, system
+/// state) onto the configured MQTT broker so Home Assistant creates the
+/// corresponding entities automatically, grouped under one device. openHAB,
+/// ioBroker, and Domoticz consume the same discovery format.</item>
+/// <item>Core→HA (REST): when a Home Assistant URL and long-lived access
+/// token are configured, the plugin registers an output action provider so
+/// HA scenes, scripts, and automations can be fired from the device's
+/// Output Events (and thus from control surfaces, custom menus, input
+/// triggers, timelines, and scripts).</item>
+/// </list>
 /// </summary>
 /// <remarks>
 /// Topic layout (serial is the device hardware id):
@@ -29,11 +37,22 @@ public class HomeAssistantPlugin : IPlugin
     private const string ExposeZonesKey = "expose-zones";
     private const string ExposeControlValuesKey = "expose-control-values";
     private const string ExposeSystemKey = "expose-system";
+    private const string HaUrlKey = "ha-url";
+    private const string HaTokenKey = "ha-token";
 
     private IPluginHost host = null!;
     private readonly List<IDisposable> subscriptions = [];
     private IDisposable? statusSubscription;
     private string statusPrefix = "";
+
+    // Core→HA REST side: present only while URL + token are configured
+    private HaRestClient? restClient;
+    private IDisposable? actionProviderHandle;
+    private IDisposable? restHealthSchedule;
+    private string restConfigKey = "";
+    private int publishedCount;
+    private bool? restHealthy;
+    private string? restHealthDetail;
 
     // Entities currently published to HA, keyed by objectId (rebuilt by every
     // PublishAll; commands and state changes resolve through this)
@@ -93,6 +112,21 @@ public class HomeAssistantPlugin : IPlugin
                 Type = PluginSettingType.Boolean,
                 DefaultValue = "true",
             },
+            new()
+            {
+                Key = HaUrlKey,
+                Label = "Home Assistant URL",
+                Type = PluginSettingType.String,
+                Description = "Lets the device fire HA scenes, scripts, and automations (Output Events of type Home Assistant). E.g. http://homeassistant.local:8123 — leave empty if you only need HA to control the device.",
+            },
+            new()
+            {
+                Key = HaTokenKey,
+                Label = "Long-lived access token",
+                Type = PluginSettingType.String,
+                Secret = true,
+                Description = "Create one in Home Assistant under your profile → Security → Long-lived access tokens",
+            },
         ],
     };
 
@@ -119,6 +153,8 @@ public class HomeAssistantPlugin : IPlugin
         // first PublishAll when the broker is already connected
         this.subscriptions.Add(host.Mqtt.OnConnectionChanged(HandleConnectionChanged));
 
+        ConfigureRestProvider();
+
         return Task.CompletedTask;
     }
 
@@ -130,8 +166,136 @@ public class HomeAssistantPlugin : IPlugin
         }
 
         this.statusSubscription?.Dispose();
+        TearDownRestProvider();
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// (Re)build the Core→HA side from the URL/token settings: register the
+    /// action provider when both are set, drop it when either is cleared,
+    /// rebuild when they change. Runs a health check so a bad URL or token
+    /// shows on the Plugins page without waiting for the first Output Event.
+    /// </summary>
+    private void ConfigureRestProvider()
+    {
+        string url = (this.host.Settings.GetString(HaUrlKey) ?? string.Empty).Trim();
+        string token = (this.host.Settings.GetString(HaTokenKey) ?? string.Empty).Trim();
+        string key = url.Length > 0 && token.Length > 0 ? $"{url}\n{token}" : string.Empty;
+
+        if (string.Equals(key, this.restConfigKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        TearDownRestProvider();
+        this.restConfigKey = key;
+
+        if (key.Length == 0)
+        {
+            ReportStatus();
+
+            return;
+        }
+
+        try
+        {
+            this.restClient = new HaRestClient(url, token);
+        }
+        catch (Exception ex)
+        {
+            this.host.Logger.LogWarning("Home Assistant URL '{Url}' is not valid: {Message}", url, ex.Message);
+            this.restHealthy = false;
+            this.restHealthDetail = $"invalid URL '{url}'";
+            ReportStatus();
+
+            return;
+        }
+
+        var provider = new HaActionProvider(this.restClient, ReportRestHealth);
+        this.actionProviderHandle = this.host.Actions.RegisterProvider(provider);
+        this.host.Logger.LogInformation("Home Assistant REST API configured at {Url}; scenes/scripts/automations available as Output Event targets", this.restClient.BaseAddress);
+
+        // Immediate check, then a slow periodic re-check so a recovered HA
+        // (or a revoked token) is reflected without user action
+        this.restHealthSchedule = this.host.SchedulePeriodic(TimeSpan.FromMinutes(5), CheckRestHealth);
+        ReportStatus();
+    }
+
+    private void TearDownRestProvider()
+    {
+        this.restHealthSchedule?.Dispose();
+        this.restHealthSchedule = null;
+        this.actionProviderHandle?.Dispose();
+        this.actionProviderHandle = null;
+        this.restClient?.Dispose();
+        this.restClient = null;
+        this.restHealthy = null;
+        this.restHealthDetail = null;
+        this.restConfigKey = string.Empty;
+    }
+
+    private async Task CheckRestHealth(CancellationToken cancellationToken)
+    {
+        var client = this.restClient;
+        if (client == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await client.CheckAsync(cancellationToken);
+            ReportRestHealth(true, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReportRestHealth(false, ex.Message);
+        }
+    }
+
+    private void ReportRestHealth(bool healthy, string? detail)
+    {
+        if (this.restHealthy == healthy && this.restHealthDetail == detail)
+        {
+            return;
+        }
+
+        if (!healthy)
+        {
+            this.host.Logger.LogWarning("Home Assistant REST API unavailable: {Detail}", detail);
+        }
+        else if (this.restHealthy == false)
+        {
+            this.host.Logger.LogInformation("Home Assistant REST API reachable again");
+        }
+
+        this.restHealthy = healthy;
+        this.restHealthDetail = detail;
+        ReportStatus();
+    }
+
+    /// <summary>
+    /// One connection-state line for the Plugins page covering both
+    /// directions: "N entities published" (MQTT) plus the REST API health
+    /// when configured. Connected only when everything configured works.
+    /// </summary>
+    private void ReportStatus()
+    {
+        bool mqttOk = this.host.Mqtt.IsConnected;
+        string detail = mqttOk ? $"{this.publishedCount} entities published" : "MQTT broker not connected";
+
+        if (this.restConfigKey.Length > 0)
+        {
+            detail += this.restHealthy switch
+            {
+                true => "; HA API ok",
+                false => $"; HA API: {this.restHealthDetail}",
+                null => "; HA API: checking",
+            };
+        }
+
+        this.host.SetConnectionState(mqttOk && this.restHealthy != false, detail);
     }
 
     private void SubscribeStatusTopic()
@@ -169,6 +333,8 @@ public class HomeAssistantPlugin : IPlugin
         {
             SubscribeStatusTopic();
         }
+
+        ConfigureRestProvider();
 
         // PublishAll clears configs left under a previous prefix via the
         // persisted publish record
@@ -252,7 +418,8 @@ public class HomeAssistantPlugin : IPlugin
         await PublishRecord.Save(this.host, prefix, map, cancellationToken);
 
         this.host.Logger.LogInformation("Published {Count} entities to discovery prefix '{Prefix}'", map.Count, prefix);
-        this.host.SetConnectionState(true, $"{map.Count} entities published");
+        this.publishedCount = map.Count;
+        ReportStatus();
     }
 
     private async Task HandleEntityState(PluginEntityState state, CancellationToken cancellationToken)
