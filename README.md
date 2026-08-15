@@ -200,6 +200,19 @@ dmxcore/{serial}/availability                             device online/offline 
 dmxcore/{serial}/plugin/home-assistant/availability       plugin online/offline (host-managed)
 ```
 
+## Credits
+
+- [AlexWHughes](https://github.com/AlexWHughes) — HA scene when playback stops,
+  optional Home Assistant MQTT broker, and expose allow-list.
+- [HakanL](https://github.com/HakanL) (Hakan Lindestaf) — original MQTT
+  Discovery plugin that publishes the Core into Home Assistant, and the
+  REST action provider (scenes, scripts, and automations as Output Event
+  targets).
+- [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+  — config, state, command, and availability topic layout.
+- [MQTTnet](https://github.com/dotnet/MQTTnet) — optional second MQTT client
+  when the Core Remote Control broker is not Home Assistant's.
+
 Every push to `main` recreates the rolling `latest` release carrying the
 packed `.dmxplugin`; the DMX Core 100 product build downloads it from there
 and bundles it as a built-in plugin.
