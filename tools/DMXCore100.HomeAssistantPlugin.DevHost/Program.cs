@@ -24,11 +24,12 @@ host.EntityStates["system.masterdimmer"] = new PluginEntityState { Code = "syste
 host.EntityStates["system.mute"] = new PluginEntityState { Code = "system.mute", IsOn = false };
 
 // Core->HA direction: point at a real Home Assistant to try the action
-// provider (ha <url> <token>), then `targets` / `fire <entity_id>`
-if (args.Length >= 2)
+// provider (`ha <url>` or pass the URL as the first argument). The token
+// comes from HA_TOKEN or a masked prompt — never the command line.
+if (args.Length >= 1)
 {
     host.SetSetting("ha-url", args[0]);
-    host.SetSetting("ha-token", args[1]);
+    host.SetSetting("ha-token", ReadAccessToken());
 }
 
 Console.WriteLine($"=== {plugin.Info.Name} {plugin.Info.Version} dev host ===");
@@ -86,14 +87,14 @@ while (running)
                 break;
 
             case "ha":
-                if (parts.Length < 3)
+                if (parts.Length < 2)
                 {
-                    Console.WriteLine("usage: ha <url> <token>   e.g. ha http://homeassistant.local:8123 eyJ...");
+                    Console.WriteLine("usage: ha <url>   e.g. ha https://homeassistant.local:8123");
 
                     break;
                 }
                 host.SetSetting("ha-url", parts[1]);
-                host.SetSetting("ha-token", parts[2]);
+                host.SetSetting("ha-token", ReadAccessToken());
                 await host.TriggerSettingsChangedAsync();
                 Console.WriteLine($"  provider registered: {host.ActionProvider != null}; {host.ConnectionDetail}");
                 break;
@@ -101,7 +102,7 @@ while (running)
             case "targets":
                 if (host.ActionProvider == null)
                 {
-                    Console.WriteLine("  no action provider (set ha <url> <token> first)");
+                    Console.WriteLine("  no action provider (set ha <url> first)");
 
                     break;
                 }
@@ -112,12 +113,19 @@ while (running)
             case "fire":
                 if (host.ActionProvider == null || parts.Length < 2)
                 {
-                    Console.WriteLine("usage: fire <entity_id> [json payload]   (needs ha <url> <token> first)");
+                    Console.WriteLine("usage: fire <entity_id> [json payload]   (needs ha <url> first)");
 
                     break;
                 }
                 await host.ActionProvider.ExecuteAsync(parts[1], parts.Length > 2 ? parts[2] : null, CancellationToken.None);
                 Console.WriteLine($"  fired {parts[1]}; {host.ConnectionDetail}");
+                break;
+
+            case "stop":
+                await host.SimulateCueEndedAsync(parts.Length > 1 ? parts[1] : "cue.SUNSET");
+                await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.nowplaying", Text = "" });
+                await plugin.DelayAsync(plugin.StopSceneSettle, CancellationToken.None);
+                Console.WriteLine($"  {host.ConnectionDetail}");
                 break;
 
             case "d":
@@ -160,10 +168,49 @@ static void PrintHelp()
           np [text]            simulate a now-playing sensor change
           rm                   remove preset.PARTY from the catalog (ghost cleanup)
           x                    toggle MQTT connection (republish on reconnect)
-          ha <url> <token>     configure the HA REST API (Core->HA direction)
+          ha <url>             configure the HA REST API (token from HA_TOKEN or prompt)
           targets              list HA scenes/scripts/automations via the provider
           fire <entity_id> [j] fire one (optional JSON payload merged into service data)
+          stop [code]          simulate cue end / idle now-playing (optional stop HA scene)
           d                    dump counters
           q                    quit (runs plugin shutdown)
         """);
+}
+
+static string ReadAccessToken()
+{
+    string? fromEnv = Environment.GetEnvironmentVariable("HA_TOKEN");
+    if (!string.IsNullOrWhiteSpace(fromEnv))
+    {
+        return fromEnv.Trim();
+    }
+
+    Console.Write("Home Assistant long-lived access token: ");
+    var token = new System.Text.StringBuilder();
+    while (true)
+    {
+        ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+        if (key.Key == ConsoleKey.Enter)
+        {
+            Console.WriteLine();
+            break;
+        }
+
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (token.Length > 0)
+            {
+                token.Length--;
+            }
+
+            continue;
+        }
+
+        if (!char.IsControl(key.KeyChar))
+        {
+            token.Append(key.KeyChar);
+        }
+    }
+
+    return token.ToString().Trim();
 }
