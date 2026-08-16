@@ -30,7 +30,9 @@ public sealed class HaRestClient : IDisposable
 
     public HaRestClient(string baseUrl, string token, HttpMessageHandler? handler = null)
     {
-        this.http = handler == null ? new HttpClient() : new HttpClient(handler);
+        this.http = handler == null
+            ? new HttpClient()
+            : new HttpClient(handler, disposeHandler: false);
         this.http.BaseAddress = new Uri(baseUrl.Trim().TrimEnd('/') + "/");
         // Shorter than the host's 10 s action timeout so the plugin's more
         // specific "did not answer" message is the one the user sees

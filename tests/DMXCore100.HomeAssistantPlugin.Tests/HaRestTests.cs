@@ -167,7 +167,7 @@ public class HaRestTests
     [TestMethod]
     public async Task Plugin_UrlAndToken_RegistersProvider_ClearedSettingsUnregister()
     {
-        var plugin = new HomeAssistantPlugin();
+        var plugin = new HomeAssistantPlugin { RestHandler = OnlineHandler() };
         var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
         host.SetSetting("ha-url", "http://ha.local:8123");
         host.SetSetting("ha-token", "tok");
@@ -189,7 +189,7 @@ public class HaRestTests
     [TestMethod]
     public async Task Plugin_ChangedUrl_ReplacesProvider()
     {
-        var plugin = new HomeAssistantPlugin();
+        var plugin = new HomeAssistantPlugin { RestHandler = OnlineHandler() };
         var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
         host.SetSetting("ha-url", "http://ha.local:8123");
         host.SetSetting("ha-token", "tok");
@@ -201,6 +201,32 @@ public class HaRestTests
 
         Assert.IsNotNull(host.ActionProvider);
         Assert.AreNotSame(first, host.ActionProvider);
+    }
+
+    [TestMethod]
+    public async Task Plugin_StaleHealthCheck_DoesNotOverwriteReplacementClient()
+    {
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StaleHealthHandler(firstStarted, releaseFirst);
+        var plugin = new HomeAssistantPlugin { RestHandler = handler };
+        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
+        host.SetSetting("ha-url", "http://ha.local:8123");
+        host.SetSetting("ha-token", "tok");
+
+        Task init = plugin.InitializeAsync(host, CancellationToken.None);
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        host.SetSetting("ha-url", "http://other.local:8123");
+        await host.TriggerSettingsChangedAsync();
+
+        StringAssert.Contains(host.ConnectionDetail!, "HA API ok");
+
+        releaseFirst.TrySetResult();
+        await init.WaitAsync(TimeSpan.FromSeconds(5));
+
+        StringAssert.Contains(host.ConnectionDetail!, "HA API ok");
+        StringAssert.DoesNotMatch(host.ConnectionDetail ?? string.Empty, new System.Text.RegularExpressions.Regex("500"));
     }
 
     [TestMethod]
@@ -218,9 +244,18 @@ public class HaRestTests
         StringAssert.Contains(host.ConnectionDetail!, "invalid URL");
     }
 
+    private static FakeHandler OnlineHandler()
+    {
+        var handler = new FakeHandler();
+        handler.Respond("GET", "/api/", HttpStatusCode.OK, """{"message":"API running."}""");
+        handler.Respond("GET", "/api/states", HttpStatusCode.OK, "[]");
+        return handler;
+    }
+
     private sealed class FakeHandler : HttpMessageHandler
     {
         private readonly Dictionary<string, (HttpStatusCode Status, string Body)> responses = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object requestsLock = new();
 
         public List<(string Method, string Url, string? Authorization, string? Body)> Requests { get; } = [];
 
@@ -232,12 +267,50 @@ public class HaRestTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             string? body = request.Content == null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
-            this.Requests.Add((request.Method.Method, request.RequestUri!.ToString(), request.Headers.Authorization?.ToString(), body));
+            lock (this.requestsLock)
+            {
+                this.Requests.Add((request.Method.Method, request.RequestUri!.ToString(), request.Headers.Authorization?.ToString(), body));
+            }
 
             if (!this.responses.TryGetValue($"{request.Method.Method} {request.RequestUri.AbsolutePath}", out var response))
                 return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("no fake response") };
 
             return new HttpResponseMessage(response.Status) { Content = new StringContent(response.Body) };
+        }
+    }
+
+    private sealed class StaleHealthHandler : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource firstStarted;
+        private readonly TaskCompletionSource releaseFirst;
+
+        public StaleHealthHandler(TaskCompletionSource firstStarted, TaskCompletionSource releaseFirst)
+        {
+            this.firstStarted = firstStarted;
+            this.releaseFirst = releaseFirst;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method != HttpMethod.Get || request.RequestUri?.AbsolutePath != "/api/")
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            if (string.Equals(request.RequestUri.Host, "ha.local", StringComparison.OrdinalIgnoreCase))
+            {
+                this.firstStarted.TrySetResult();
+                await this.releaseFirst.Task.WaitAsync(cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                {
+                    Content = new StringContent("stale"),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"message":"API running."}"""),
+            };
         }
     }
 }
