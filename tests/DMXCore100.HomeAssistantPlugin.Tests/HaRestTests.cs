@@ -177,6 +177,7 @@ public class HaRestTests
         Assert.IsNotNull(host.ActionProvider);
         Assert.IsInstanceOfType<HaActionProvider>(host.ActionProvider);
         Assert.AreEqual(1, host.PeriodicTasks.Count, "health re-check scheduled");
+        await host.RunPeriodicTaskAsync(0);
         StringAssert.Contains(host.ConnectionDetail!, "HA API");
 
         host.SetSetting("ha-token", "");
@@ -204,6 +205,25 @@ public class HaRestTests
     }
 
     [TestMethod]
+    public async Task Plugin_Initialize_DoesNotWaitForRestHealth()
+    {
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var plugin = new HomeAssistantPlugin { RestHandler = new StaleHealthHandler(firstStarted, releaseFirst) };
+        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
+        host.SetSetting("ha-url", "http://ha.local:8123");
+        host.SetSetting("ha-token", "tok");
+
+        await plugin.InitializeAsync(host, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.IsNotNull(host.ActionProvider);
+        Assert.AreEqual(1, host.PeriodicTasks.Count);
+        Assert.IsFalse(firstStarted.Task.IsCompleted, "health check runs from SchedulePeriodic, not inline during Initialize");
+
+        releaseFirst.TrySetResult();
+    }
+
+    [TestMethod]
     public async Task Plugin_StaleHealthCheck_DoesNotOverwriteReplacementClient()
     {
         var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -214,16 +234,25 @@ public class HaRestTests
         host.SetSetting("ha-url", "http://ha.local:8123");
         host.SetSetting("ha-token", "tok");
 
-        Task init = plugin.InitializeAsync(host, CancellationToken.None);
+        await plugin.InitializeAsync(host, CancellationToken.None);
+        Task firstCheck = host.RunPeriodicTaskAsync(0);
         await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         host.SetSetting("ha-url", "http://other.local:8123");
         await host.TriggerSettingsChangedAsync();
+        await host.RunPeriodicTaskAsync(host.PeriodicTasks.Count - 1);
 
         StringAssert.Contains(host.ConnectionDetail!, "HA API ok");
 
         releaseFirst.TrySetResult();
-        await init.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            await firstCheck.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposing the first schedule may cancel its in-flight check.
+        }
 
         StringAssert.Contains(host.ConnectionDetail!, "HA API ok");
         StringAssert.DoesNotMatch(host.ConnectionDetail ?? string.Empty, new System.Text.RegularExpressions.Regex("500"));

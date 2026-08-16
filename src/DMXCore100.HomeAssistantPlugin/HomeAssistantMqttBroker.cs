@@ -242,6 +242,16 @@ internal sealed class HomeAssistantMqttBroker : IHomeAssistantMqttBroker
             return;
         }
 
+        // MQTTnet 4 also raises DisconnectedAsync when ConnectAsync fails
+        // (ClientWasConnected == false). StartAsync / ConnectWithRetryAsync
+        // already retry that case; handling it here would queue another
+        // waiter on connectGate per failed attempt and N× PublishAll when
+        // the broker finally comes up.
+        if (!args.ClientWasConnected)
+        {
+            return;
+        }
+
         this.host.Logger.LogWarning("Home Assistant MQTT broker disconnected; retrying");
         try
         {

@@ -36,6 +36,7 @@ Console.WriteLine($"=== {plugin.Info.Name} {plugin.Info.Version} dev host ===");
 Console.WriteLine();
 
 await plugin.InitializeAsync(host, CancellationToken.None);
+await RunLatestPeriodicAsync(host);
 
 PrintHelp();
 
@@ -89,13 +90,14 @@ while (running)
             case "ha":
                 if (parts.Length < 2)
                 {
-                    Console.WriteLine("usage: ha <url>   e.g. ha https://homeassistant.local:8123");
+                    Console.WriteLine("usage: ha <url>   e.g. ha http://homeassistant.local:8123");
 
                     break;
                 }
                 host.SetSetting("ha-url", parts[1]);
                 host.SetSetting("ha-token", ReadAccessToken());
                 await host.TriggerSettingsChangedAsync();
+                await RunLatestPeriodicAsync(host);
                 Console.WriteLine($"  provider registered: {host.ActionProvider != null}; {host.ConnectionDetail}");
                 break;
 
@@ -175,6 +177,14 @@ static void PrintHelp()
           d                    dump counters
           q                    quit (runs plugin shutdown)
         """);
+}
+
+static async Task RunLatestPeriodicAsync(TestPluginHost host)
+{
+    if (host.PeriodicTasks.Count > 0)
+    {
+        await host.RunPeriodicTaskAsync(host.PeriodicTasks.Count - 1);
+    }
 }
 
 static string ReadAccessToken()

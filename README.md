@@ -67,10 +67,10 @@ All of these live under **Settings → Plugins → Home Assistant**.
 | **Discovery prefix** | MQTT discovery prefix. Leave at `homeassistant` unless you changed it in HA. |
 | **Expose presets, cues, and timelines** / **schedules** / **zones** / **Control Values** / **system entities** | Per-category toggles. Off hides that whole group from HA. |
 | **Only these presets, cues, and timelines** | Optional allow-list. Empty publishes every look (when the category is on). |
-| **Home Assistant URL** | Base URL of HA (e.g. `https://192.168.1.27:8123`). Required for Output Events and **HA scene when playback stops**. Leave empty if you only need HA to control the device. HTTP should only be used on a deliberately trusted development network. |
+| **Home Assistant URL** | Base URL of HA (e.g. `http://homeassistant.local:8123`). Required for Output Events and **HA scene when playback stops**. Leave empty if you only need HA to control the device. Prefer an IPv4 address if `.local` does not resolve on the device. |
 | **Long-lived access token** | Token from HA **profile → Security**. Required with the URL. |
-| **HA scene when playback stops** | Optional scene, script, or automation (friendly name or entity id) fired after a short settle when a cue ends, Now Playing is idle, or Stop is pressed. |
-| **Home Assistant MQTT broker** / **port** / **username** / **password** / **TLS** | Optional second broker. Fill these in when the Core's Remote Control MQTT server is *not* HA's Mosquitto. Leave the broker empty to use only the Core MQTT server. |
+| **HA scene when playback stops** | Optional scene, script, or automation (friendly name or entity id) fired after a short settle when the last cue ends or Now Playing is idle. |
+| **Home Assistant MQTT broker** / **port** / **username** / **password** / **TLS** | Fill these in **only** when the Core's Remote Control MQTT server is a *different* broker from HA's Mosquitto. Leave the broker empty to use only the Core MQTT server. Do not enter the same server twice. |
 
 #### Choosing which looks appear in Home Assistant
 
@@ -93,10 +93,14 @@ Use **Settings → Plugins → Home Assistant**:
 
 #### Optional: a separate Home Assistant MQTT broker
 
-If the Core's Remote Control MQTT broker is **not** Home Assistant's
-Mosquitto, set **Home Assistant MQTT broker** (and port, credentials, TLS
-if needed). Discovery is then published to both brokers. Leave the broker
-field empty to use only the Core MQTT server.
+Use **Home Assistant MQTT broker** **only when** the Core's Remote Control
+MQTT broker is a **different server** from Home Assistant's Mosquitto (and
+port, credentials, TLS if needed). Discovery is then published to both
+brokers. Leave the broker field empty to use only the Core MQTT server.
+
+Do not point this at the same broker as Settings → Remote Control: both
+clients would subscribe to the same command topics (every HA scene press
+would run twice) and fight over the retained availability messages.
 
 #### Triggering Home Assistant from the DMX Core (optional)
 
@@ -107,9 +111,9 @@ where HA is and have a token:
    **Long-lived access token** (name it e.g. `DMX Core`). Copy it — HA shows
    it only once.
 2. On the DMX Core web UI, **Settings → Plugins → Home Assistant**: enter
-   the **Home Assistant URL** (e.g. `https://192.168.1.27:8123`) and paste
-   the token into **Long-lived access token**. Use HTTP only on a
-   deliberately trusted development network. The plugin status shows
+   the **Home Assistant URL** (e.g. `http://homeassistant.local:8123`) and paste
+   the token into **Long-lived access token**. Prefer an IPv4 address if
+   `homeassistant.local` does not resolve on the device. The plugin status shows
    *HA API ok* once the token is accepted.
 3. **Input/Output → Output Events → New**: set the type to **Home
    Assistant** and pick the scene, script, or automation from the **Target**
@@ -129,10 +133,10 @@ If HA is unreachable when an event fires, the rest of the button's work
 Test button.
 
 Optional: **HA scene when playback stops** fires a chosen HA scene, script,
-or automation after a short settle when a cue ends, Now Playing is idle, or
-Stop is pressed. Set it to a friendly name or entity id (for example
-`All Off` or `scene.all_off`). URL and token must already be set; if another
-cue starts during the settle, the stop scene is cancelled.
+or automation after a short settle when the last cue ends or Now Playing is
+idle. Set it to a friendly name or entity id (for example `All Off` or
+`scene.all_off`). URL and token must already be set; if another cue is still
+playing (or starts during the settle), the stop scene is cancelled.
 
 ### Ideas
 
@@ -155,7 +159,8 @@ cue starts during the settle, the stop scene is cancelled.
 - No device in HA: check the MQTT integration is connected to the *same*
   broker as the DMX Core, and that the DMX Core web UI shows the plugin as
   connected (Settings → Plugins). If Core MQTT and HA's Mosquitto are
-  different brokers, fill in **Home Assistant MQTT broker**.
+  different brokers, fill in **Home Assistant MQTT broker** — but only then;
+  the same server in both places duplicates commands.
 - Entities show unavailable: the broker lost the device — check network and
   the Remote Control MQTT settings. The device reconnects automatically.
 - Deleted a preset but it lingers in HA: it is removed automatically on the
@@ -169,7 +174,7 @@ cue starts during the settle, the stop scene is cancelled.
   address if `homeassistant.local` does not resolve on the device.
 - **HA scene when playback stops** does nothing: URL and token must be set,
   the value must match a scene/script/automation name or entity id, and a
-  new cue starting during the settle cancels it.
+  new cue starting during the settle (or another cue still playing) cancels it.
 
 ## Development
 

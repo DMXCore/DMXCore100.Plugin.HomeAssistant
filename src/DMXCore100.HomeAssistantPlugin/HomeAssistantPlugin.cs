@@ -66,6 +66,9 @@ public class HomeAssistantPlugin : IPlugin
     private IHomeAssistantMqttBroker? haMqtt;
     private string haMqttConfigKey = "";
     private CancellationTokenSource? stopSceneDelay;
+    private readonly HashSet<string> playingCueCodes = new(StringComparer.OrdinalIgnoreCase);
+    private string? stopSceneResolvedId;
+    private string? stopSceneResolvedSetting;
 
     // Entities currently published to HA, keyed by objectId (rebuilt by every
     // PublishAll; commands and state changes resolve through this)
@@ -154,7 +157,7 @@ public class HomeAssistantPlugin : IPlugin
                 Key = HaUrlKey,
                 Label = "Home Assistant URL",
                 Type = PluginSettingType.String,
-                Description = "Lets the device fire HA scenes, scripts, and automations (Output Events of type Home Assistant). E.g. https://homeassistant.local:8123 — leave empty if you only need HA to control the device.",
+                Description = "Lets the device fire HA scenes, scripts, and automations (Output Events of type Home Assistant). E.g. http://homeassistant.local:8123 — prefer an IPv4 address if .local does not resolve on the device. Leave empty if you only need HA to control the device.",
             },
             new()
             {
@@ -169,14 +172,14 @@ public class HomeAssistantPlugin : IPlugin
                 Key = StopHaSceneKey,
                 Label = "HA scene when playback stops",
                 Type = PluginSettingType.String,
-                Description = "Optional scene, script, or automation (friendly name or entity id) fired after a short settle when a cue ends, Now Playing is idle, or Stop is pressed",
+                Description = "Optional scene, script, or automation (friendly name or entity id) fired after a short settle when the last cue ends or Now Playing is idle",
             },
             new()
             {
                 Key = HaMqttBrokerKey,
                 Label = "Home Assistant MQTT broker",
                 Type = PluginSettingType.String,
-                Description = "Optional. Hostname of Home Assistant's Mosquitto when the Core MQTT connection is a different broker. Leave empty to use only the Core MQTT server.",
+                Description = "Only when Core MQTT (Settings → Remote Control) is a different broker from Home Assistant's Mosquitto. Do not enter the same server as Core MQTT — every command would run twice and the two clients would fight over availability. Leave empty to use only the Core MQTT server.",
             },
             new()
             {
@@ -256,7 +259,7 @@ public class HomeAssistantPlugin : IPlugin
     /// rebuild when they change. Runs a health check so a bad URL or token
     /// shows on the Plugins page without waiting for the first Output Event.
     /// </summary>
-    private async Task ConfigureRestProviderAsync(CancellationToken cancellationToken)
+    private Task ConfigureRestProviderAsync(CancellationToken cancellationToken)
     {
         string url = (this.host.Settings.GetString(HaUrlKey) ?? string.Empty).Trim();
         string token = (this.host.Settings.GetString(HaTokenKey) ?? string.Empty).Trim();
@@ -264,7 +267,7 @@ public class HomeAssistantPlugin : IPlugin
 
         if (string.Equals(key, this.restConfigKey, StringComparison.Ordinal))
         {
-            return;
+            return Task.CompletedTask;
         }
 
         TearDownRestProvider();
@@ -274,7 +277,7 @@ public class HomeAssistantPlugin : IPlugin
         {
             ReportStatus();
 
-            return;
+            return Task.CompletedTask;
         }
 
         try
@@ -288,7 +291,7 @@ public class HomeAssistantPlugin : IPlugin
             this.restHealthDetail = $"invalid URL '{url}'";
             ReportStatus();
 
-            return;
+            return Task.CompletedTask;
         }
 
         var client = this.restClient;
@@ -297,16 +300,12 @@ public class HomeAssistantPlugin : IPlugin
         this.actionProviderHandle = this.host.Actions.RegisterProvider(provider);
         this.host.Logger.LogInformation("Home Assistant REST API configured at {Url}; scenes/scripts/automations available as Output Event targets", client.BaseAddress);
 
-        // Immediate check, then a slow periodic re-check so a recovered HA
-        // (or a revoked token) is reflected without user action
-        await CheckRestHealth(cancellationToken);
-        if (!ReferenceEquals(client, this.restClient))
-        {
-            return;
-        }
-
+        // SchedulePeriodic invokes immediately on the real host (no initial
+        // delay), so this is the first health check without blocking
+        // InitializeAsync / settings-changed on the network.
         this.restHealthSchedule = this.host.SchedulePeriodic(TimeSpan.FromMinutes(5), CheckRestHealth);
         ReportStatus();
+        return Task.CompletedTask;
     }
 
     private void TearDownRestProvider()
@@ -322,6 +321,7 @@ public class HomeAssistantPlugin : IPlugin
         this.restHealthy = null;
         this.restHealthDetail = null;
         this.restConfigKey = string.Empty;
+        ClearStopSceneResolution();
     }
 
     private async Task CheckRestHealth(CancellationToken cancellationToken)
@@ -432,6 +432,8 @@ public class HomeAssistantPlugin : IPlugin
 
     private async Task HandleSettingsChanged(CancellationToken cancellationToken)
     {
+        ClearStopSceneResolution();
+
         if (!string.Equals(this.statusPrefix, DiscoveryPrefix, StringComparison.Ordinal))
         {
             SubscribeStatusTopic();
@@ -529,11 +531,12 @@ public class HomeAssistantPlugin : IPlugin
     {
         if (string.Equals(state.Code, "system.nowplaying", StringComparison.OrdinalIgnoreCase))
         {
-            if (IsIdlePlayback(state.Text))
+            bool idle = IsIdlePlayback(state.Text);
+            if (idle && this.playingCueCodes.Count == 0)
             {
                 ScheduleStopScene();
             }
-            else
+            else if (!idle)
             {
                 CancelStopScene();
             }
@@ -583,11 +586,6 @@ public class HomeAssistantPlugin : IPlugin
         }
 
         await this.host.Entities.ExecuteAsync(entity.Code, command, cancellationToken);
-
-        if (string.Equals(entity.Code, "system.stop", StringComparison.OrdinalIgnoreCase))
-        {
-            ScheduleStopScene();
-        }
     }
 
     private Task HandleHaMqttMessage(MqttMessage message, CancellationToken cancellationToken)
@@ -641,9 +639,10 @@ public class HomeAssistantPlugin : IPlugin
         string? username = this.host.Settings.GetString(HaMqttUsernameKey);
         string? password = this.host.Settings.GetString(HaMqttPasswordKey);
         bool tls = this.host.Settings.GetBoolean(HaMqttTlsKey) == true;
+        string prefix = DiscoveryPrefix;
         string key = this.mqttFactory != null
-            ? "factory"
-            : broker == null ? "" : $"{broker}\n{port}\n{username}\n{password}\n{tls}";
+            ? $"factory\n{prefix}"
+            : broker == null ? "" : $"{broker}\n{port}\n{username}\n{password}\n{tls}\n{prefix}";
 
         if (string.Equals(key, this.haMqttConfigKey, StringComparison.Ordinal))
         {
@@ -659,6 +658,9 @@ public class HomeAssistantPlugin : IPlugin
         }
         else if (broker != null)
         {
+            this.host.Logger.LogWarning(
+                "Connecting a dedicated Home Assistant MQTT broker at {Server}:{Port}. Use this only when it is a different server from Settings → Remote Control MQTT; pointing both at the same broker duplicates commands and fights over availability.",
+                broker, port);
             this.haMqtt = new HomeAssistantMqttBroker(
                 this.host, broker, port, username, password, tls, HandleHaMqttMessage, PublishAll);
         }
@@ -699,13 +701,19 @@ public class HomeAssistantPlugin : IPlugin
 
     private Task HandleCueStarted(CuePlaybackEvent evt, CancellationToken cancellationToken)
     {
+        this.playingCueCodes.Add(evt.CueCode);
         CancelStopScene();
         return Task.CompletedTask;
     }
 
     private Task HandleCueEnded(CuePlaybackEvent evt, CancellationToken cancellationToken)
     {
-        ScheduleStopScene();
+        this.playingCueCodes.Remove(evt.CueCode);
+        if (this.playingCueCodes.Count == 0)
+        {
+            ScheduleStopScene();
+        }
+
         return Task.CompletedTask;
     }
 
@@ -771,6 +779,15 @@ public class HomeAssistantPlugin : IPlugin
             return;
         }
 
+        string? resolvedId = this.stopSceneResolvedId;
+        if (resolvedId != null
+            && string.Equals(configured, this.stopSceneResolvedSetting, StringComparison.OrdinalIgnoreCase))
+        {
+            await provider.ExecuteAsync(resolvedId, payload: null, cancellationToken);
+            this.host.Logger.LogInformation("Activated Home Assistant {Id} on stop", resolvedId);
+            return;
+        }
+
         IReadOnlyList<PluginActionTarget> targets = await provider.GetTargetsAsync(cancellationToken);
         PluginActionTarget? target = targets.FirstOrDefault(item =>
             string.Equals(item.Id, configured, StringComparison.OrdinalIgnoreCase)
@@ -782,8 +799,16 @@ public class HomeAssistantPlugin : IPlugin
             return;
         }
 
+        this.stopSceneResolvedSetting = configured;
+        this.stopSceneResolvedId = target.Id;
         await provider.ExecuteAsync(target.Id, payload: null, cancellationToken);
         this.host.Logger.LogInformation("Activated Home Assistant {Id} ({Label}) on stop", target.Id, target.Label);
+    }
+
+    private void ClearStopSceneResolution()
+    {
+        this.stopSceneResolvedId = null;
+        this.stopSceneResolvedSetting = null;
     }
 
     private static bool IsSupportedEntityId(string value)
@@ -800,28 +825,7 @@ public class HomeAssistantPlugin : IPlugin
     }
 
     private static bool IsIdlePlayback(string? nowPlaying)
-    {
-        string text = (nowPlaying ?? "").Trim();
-        if (text.Length == 0 || text == "-")
-        {
-            return true;
-        }
-
-        foreach (string prefix in new[] { "Cue:", "Preset:", "Timeline:" })
-        {
-            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                text = text[prefix.Length..].Trim();
-                break;
-            }
-        }
-
-        return text.Length == 0
-            || text.Equals("stopped", StringComparison.OrdinalIgnoreCase)
-            || text.Equals("idle", StringComparison.OrdinalIgnoreCase)
-            || text.Equals("none", StringComparison.OrdinalIgnoreCase)
-            || text.Equals("off", StringComparison.OrdinalIgnoreCase);
-    }
+        => string.IsNullOrWhiteSpace(nowPlaying);
 
     private static PluginEntityCommand? ParseCommand(PluginEntityKind kind, string payload)
     {
