@@ -266,13 +266,7 @@ public class HomeAssistantPluginTests
     [TestMethod]
     public async Task CueEnded_ConfiguredStopScene_ActivatesAfterSettle()
     {
-        var handler = new StopSceneHandler();
-        var plugin = new HomeAssistantPlugin { RestHandler = handler };
-        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
-        host.SetSetting("ha-url", "http://ha.local:8123");
-        host.SetSetting("ha-token", "tok");
-        host.SetSetting("stop-ha-scene", "All Off");
-        await plugin.InitializeAsync(host, CancellationToken.None);
+        var (plugin, host, handler) = await CreateStopScenePluginAsync();
 
         var delayStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var holdDelay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -294,13 +288,7 @@ public class HomeAssistantPluginTests
     [TestMethod]
     public async Task CueEndedThenStarted_DoesNotActivateStopScene()
     {
-        var handler = new StopSceneHandler();
-        var plugin = new HomeAssistantPlugin { RestHandler = handler };
-        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
-        host.SetSetting("ha-url", "http://ha.local:8123");
-        host.SetSetting("ha-token", "tok");
-        host.SetSetting("stop-ha-scene", "All Off");
-        await plugin.InitializeAsync(host, CancellationToken.None);
+        var (plugin, host, handler) = await CreateStopScenePluginAsync();
 
         var delayStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var delayFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -327,6 +315,44 @@ public class HomeAssistantPluginTests
     }
 
     [TestMethod]
+    public async Task CueStartedThenPreviousCueEnded_DoesNotActivateStopScene()
+    {
+        var delayRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var (plugin, host, _) = await CreateStopScenePluginAsync();
+        plugin.DelayAsync = (_, _) =>
+        {
+            delayRan.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        // Host dispatches CueStarted(B) before CueEnded(A) when B replaces A.
+        await host.SimulateCueStartedAsync("cue.B");
+        await host.SimulateCueEndedAsync("cue.A");
+
+        Assert.IsFalse(delayRan.Task.IsCompleted);
+    }
+
+    [TestMethod]
+    public async Task StopScene_WaitsUntilLastPlayingCueEnds()
+    {
+        var delayRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var (plugin, host, _) = await CreateStopScenePluginAsync();
+        plugin.DelayAsync = (_, _) =>
+        {
+            delayRan.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        await host.SimulateCueStartedAsync("cue.A");
+        await host.SimulateCueStartedAsync("cue.B");
+        await host.SimulateCueEndedAsync("cue.A");
+        Assert.IsFalse(delayRan.Task.IsCompleted);
+
+        await host.SimulateCueEndedAsync("cue.B");
+        await delayRan.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
     public async Task CueEnded_EmptyStopSetting_DoesNothing()
     {
         var delayRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -343,6 +369,46 @@ public class HomeAssistantPluginTests
     }
 
     [TestMethod]
+    public async Task NowPlayingIdle_SchedulesStopScene_CueTextDoesNot()
+    {
+        var delayRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var (plugin, host, _) = await CreateStopScenePluginAsync();
+        plugin.DelayAsync = (_, _) =>
+        {
+            delayRan.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.nowplaying", Text = "Cue: Sunset Show" });
+        Assert.IsFalse(delayRan.Task.IsCompleted);
+
+        await host.SimulateEntityStateAsync(new PluginEntityState { Code = "system.nowplaying", Text = "" });
+        await delayRan.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task StopScene_FriendlyName_ResolvesOnceUntilSettingsChange()
+    {
+        var (plugin, host, handler) = await CreateStopScenePluginAsync();
+        plugin.DelayAsync = (_, _) => Task.CompletedTask;
+
+        await host.SimulateCueEndedAsync("cue.A");
+        await WaitUntil(() => handler.TurnOnCount == 1);
+        Assert.AreEqual("scene.all_off", handler.LastTurnOn);
+        Assert.AreEqual(1, handler.StatesGetCount);
+
+        await host.SimulateCueEndedAsync("cue.B");
+        await WaitUntil(() => handler.TurnOnCount == 2);
+        Assert.AreEqual(1, handler.StatesGetCount);
+
+        host.SetSetting("stop-ha-scene", "Movie Night");
+        await host.TriggerSettingsChangedAsync();
+        await host.SimulateCueEndedAsync("cue.C");
+        await WaitUntil(() => handler.TurnOnCount == 3);
+        Assert.AreEqual("scene.movie_night", handler.LastTurnOn);
+    }
+
+    [TestMethod]
     public async Task HaMqttBroker_PublishesDiscoveryInAdditionToCoreMqtt()
     {
         var mqtt = new FakeHomeAssistantMqttBroker();
@@ -356,6 +422,39 @@ public class HomeAssistantPluginTests
         Assert.IsTrue(mqtt.Published.Any(x => x.Topic.Contains("/preset_party/config")));
         Assert.IsNotNull(FindPublished(host, "homeassistant/scene/dmxcore-test-serial/preset_party/config"));
         Assert.IsTrue(host.ConnectionDetail!.Contains("HA MQTT connected"));
+    }
+
+    [TestMethod]
+    public async Task PrefixChange_ReconnectsHaMqttBroker()
+    {
+        int created = 0;
+        var plugin = new HomeAssistantPlugin(_ =>
+        {
+            created++;
+            return new FakeHomeAssistantMqttBroker();
+        });
+        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
+        host.EntityCatalog.Add(new PluginEntity { Code = "preset.PARTY", Name = "Party Mode", Kind = PluginEntityKind.Scene });
+
+        await plugin.InitializeAsync(host, CancellationToken.None);
+        Assert.AreEqual(1, created);
+
+        host.SetSetting("discovery-prefix", "ha2");
+        await host.TriggerSettingsChangedAsync();
+
+        Assert.AreEqual(2, created);
+    }
+
+    private static async Task<(HomeAssistantPlugin Plugin, TestPluginHost Host, StopSceneHandler Handler)> CreateStopScenePluginAsync()
+    {
+        var handler = new StopSceneHandler();
+        var plugin = new HomeAssistantPlugin { RestHandler = handler };
+        var host = new TestPluginHost(plugin.Info, logOutput: _ => { });
+        host.SetSetting("ha-url", "http://ha.local:8123");
+        host.SetSetting("ha-token", "tok");
+        host.SetSetting("stop-ha-scene", "All Off");
+        await plugin.InitializeAsync(host, CancellationToken.None);
+        return (plugin, host, handler);
     }
 
     private static async Task WaitUntil(Func<bool> condition, int timeoutMs = 1000)
@@ -378,11 +477,17 @@ public class HomeAssistantPluginTests
     {
         private readonly object gate = new();
         private int turnOnCount;
+        private int statesGetCount;
         private string? lastTurnOn;
 
         public int TurnOnCount
         {
             get { lock (this.gate) { return this.turnOnCount; } }
+        }
+
+        public int StatesGetCount
+        {
+            get { lock (this.gate) { return this.statesGetCount; } }
         }
 
         public string? LastTurnOn
@@ -400,9 +505,14 @@ public class HomeAssistantPluginTests
 
             if (request.Method == HttpMethod.Get && path == "/api/states")
             {
+                lock (this.gate)
+                {
+                    this.statesGetCount++;
+                }
+
                 return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
                 {
-                    Content = new StringContent("""[{"entity_id":"scene.all_off","attributes":{"friendly_name":"All Off"}}]"""),
+                    Content = new StringContent("""[{"entity_id":"scene.all_off","attributes":{"friendly_name":"All Off"}},{"entity_id":"scene.movie_night","attributes":{"friendly_name":"Movie Night"}}]"""),
                 };
             }
 
@@ -412,7 +522,9 @@ public class HomeAssistantPluginTests
                 lock (this.gate)
                 {
                     this.turnOnCount++;
-                    this.lastTurnOn = body.Contains("scene.all_off", StringComparison.Ordinal) ? "scene.all_off" : body;
+                    this.lastTurnOn = body.Contains("scene.movie_night", StringComparison.Ordinal) ? "scene.movie_night"
+                        : body.Contains("scene.all_off", StringComparison.Ordinal) ? "scene.all_off"
+                        : body;
                 }
 
                 return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("[]") };
