@@ -10,6 +10,17 @@
     <PluginDisplayName>Home Assistant</PluginDisplayName>
     <Version>1.2.0</Version>
     <Authors>DMX Core</Authors>
+
+    <!-- Plugin registry (nuget.org) package metadata. DMXCore.Plugin.* is the
+         reserved first-party prefix; the package is produced by `dotnet pack`
+         via the DMXCore.PluginSdk pack targets. -->
+    <PackageId>DMXCore.Plugin.HomeAssistant</PackageId>
+    <Description>Home Assistant integration for the DMX Core 100 lighting controller: publishes the device (cues, presets, timelines, control values, status) to Home Assistant via MQTT Discovery, and fires Home Assistant scenes, scripts and automations from the device as output actions.</Description>
+    <PackageProjectUrl>https://docs.dmxcore.com/dmx-core-100</PackageProjectUrl>
+    <!-- Closed source: free to use with DMX Core products, no modification or redistribution (see LICENSE.txt). -->
+    <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>home-assistant;homeassistant;mqtt;smart-home</PackageTags>
     <!-- Floor: oldest SDK contract this plugin actually requires (1.7 = output
          action providers for the Core→HA direction). Without
          this override the floor would default to the contract of the SDK
@@ -28,6 +39,11 @@
          copies, so they must not be shipped inside the .dmxplugin. -->
     <PackageReference Include="DMXCore.PluginSdk" Version="1.*" ExcludeAssets="runtime" />
     <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\LICENSE.txt" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
 </Project>
