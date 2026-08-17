@@ -17,6 +17,8 @@
     <PackageId>DMXCore.Plugin.HomeAssistant</PackageId>
     <Description>Home Assistant integration for the DMX Core 100 lighting controller: publishes the device (cues, presets, timelines, control values, status) to Home Assistant via MQTT Discovery, and fires Home Assistant scenes, scripts and automations from the device as output actions.</Description>
     <PackageProjectUrl>https://docs.dmxcore.com/dmx-core-100</PackageProjectUrl>
+    <!-- Closed source: free to use with DMX Core products, no modification or redistribution (see LICENSE.txt). -->
+    <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>home-assistant;homeassistant;mqtt;smart-home</PackageTags>
     <!-- Floor: oldest SDK contract this plugin actually requires (1.7 = output
@@ -35,6 +37,7 @@
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\LICENSE.txt" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
 </Project>
