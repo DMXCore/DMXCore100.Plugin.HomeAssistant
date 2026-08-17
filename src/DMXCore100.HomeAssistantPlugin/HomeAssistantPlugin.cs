@@ -91,6 +91,8 @@ public class HomeAssistantPlugin : IPlugin
 
     internal HttpMessageHandler? RestHandler { get; set; }
 
+    internal string? CachedStopSceneEntityId => this.stopSceneResolvedId;
+
     public PluginInfo Info { get; } = new()
     {
         // Id/Name/Version come from the csproj (PluginId, PluginDisplayName,
@@ -783,7 +785,17 @@ public class HomeAssistantPlugin : IPlugin
         if (resolvedId != null
             && string.Equals(configured, this.stopSceneResolvedSetting, StringComparison.OrdinalIgnoreCase))
         {
-            await provider.ExecuteAsync(resolvedId, payload: null, cancellationToken);
+            try
+            {
+                await provider.ExecuteAsync(resolvedId, payload: null, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Scene renamed or deleted in HA since we resolved the friendly name
+                ClearStopSceneResolution();
+                throw;
+            }
+
             this.host.Logger.LogInformation("Activated Home Assistant {Id} on stop", resolvedId);
             return;
         }
@@ -799,9 +811,9 @@ public class HomeAssistantPlugin : IPlugin
             return;
         }
 
+        await provider.ExecuteAsync(target.Id, payload: null, cancellationToken);
         this.stopSceneResolvedSetting = configured;
         this.stopSceneResolvedId = target.Id;
-        await provider.ExecuteAsync(target.Id, payload: null, cancellationToken);
         this.host.Logger.LogInformation("Activated Home Assistant {Id} ({Label}) on stop", target.Id, target.Label);
     }
 

@@ -409,6 +409,25 @@ public class HomeAssistantPluginTests
     }
 
     [TestMethod]
+    public async Task StopScene_FailedExecute_ClearsResolvedId()
+    {
+        var (plugin, host, handler) = await CreateStopScenePluginAsync();
+        plugin.DelayAsync = (_, _) => Task.CompletedTask;
+
+        await host.SimulateCueEndedAsync("cue.A");
+        await WaitUntil(() => handler.TurnOnCount == 1);
+        Assert.AreEqual("scene.all_off", plugin.CachedStopSceneEntityId);
+
+        handler.FailNextTurnOn = true;
+        await host.SimulateCueEndedAsync("cue.B");
+        await WaitUntil(() => handler.TurnOnCount == 2 && plugin.CachedStopSceneEntityId == null);
+
+        await host.SimulateCueEndedAsync("cue.C");
+        await WaitUntil(() => handler.TurnOnCount == 3);
+        Assert.AreEqual("scene.all_off", plugin.CachedStopSceneEntityId);
+    }
+
+    [TestMethod]
     public async Task HaMqttBroker_PublishesDiscoveryInAdditionToCoreMqtt()
     {
         var mqtt = new FakeHomeAssistantMqttBroker();
@@ -479,6 +498,7 @@ public class HomeAssistantPluginTests
         private int turnOnCount;
         private int statesGetCount;
         private string? lastTurnOn;
+        private bool failNextTurnOn;
 
         public int TurnOnCount
         {
@@ -493,6 +513,12 @@ public class HomeAssistantPluginTests
         public string? LastTurnOn
         {
             get { lock (this.gate) { return this.lastTurnOn; } }
+        }
+
+        public bool FailNextTurnOn
+        {
+            get { lock (this.gate) { return this.failNextTurnOn; } }
+            set { lock (this.gate) { this.failNextTurnOn = value; } }
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -525,6 +551,14 @@ public class HomeAssistantPluginTests
                     this.lastTurnOn = body.Contains("scene.movie_night", StringComparison.Ordinal) ? "scene.movie_night"
                         : body.Contains("scene.all_off", StringComparison.Ordinal) ? "scene.all_off"
                         : body;
+                    if (this.failNextTurnOn)
+                    {
+                        this.failNextTurnOn = false;
+                        return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound)
+                        {
+                            Content = new StringContent("stale entity"),
+                        };
+                    }
                 }
 
                 return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("[]") };
