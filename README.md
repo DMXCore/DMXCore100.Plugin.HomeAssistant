@@ -218,6 +218,10 @@ dmxcore/{serial}/plugin/home-assistant/availability       plugin online/offline 
 - [MQTTnet](https://github.com/dotnet/MQTTnet) — optional second MQTT client
   when the Core Remote Control broker is not Home Assistant's.
 
-Every push to `main` recreates the rolling `latest` release carrying the
-packed `.dmxplugin`; the DMX Core 100 product build downloads it from there
-and bundles it as a built-in plugin.
+Every push to `main` packs the `.dmxplugin` and publishes it to the
+[nuget.org plugin registry](https://www.nuget.org/packages/DMXCore.Plugin.HomeAssistant),
+from where DMX Core 100 devices install and update it.
+
+## License
+
+[MIT](LICENSE)
