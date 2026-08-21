@@ -8,7 +8,7 @@
     <!-- The SDK generates manifest.json and PluginBuildInfo from these -->
     <PluginId>home-assistant</PluginId>
     <PluginDisplayName>Home Assistant</PluginDisplayName>
-    <Version>1.2.1</Version>
+    <Version>1.2.2</Version>
     <Authors>DMX Core</Authors>
 
     <!-- Plugin registry (nuget.org) package metadata. DMXCore.Plugin.* is the
@@ -22,7 +22,7 @@
     <!-- Embedded icon (not iconUrl) is a nuget.org reserved-prefix review
          criterion; icon.png is the same 128x128 logo the SDK packages ship. -->
     <PackageIcon>icon.png</PackageIcon>
-    <PackageTags>home-assistant;homeassistant;mqtt;smart-home</PackageTags>
+    <PackageTags>home-assistant;homeassistant;mqtt;requires-mqtt;smart-home</PackageTags>
     <!-- Floor: oldest SDK contract this plugin actually requires (1.7 = output
          action providers for the Core→HA direction). Without
          this override the floor would default to the contract of the SDK
